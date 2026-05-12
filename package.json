@@ -20,10 +20,11 @@
     "@sveltejs/adapter-static": "^3.0.10",
     "@sveltejs/kit": "^2.59",
     "@sveltejs/vite-plugin-svelte": "^7.1",
+    "@tauri-apps/cli": "^2.11",
+    "@types/node": "^25.7.0",
     "svelte": "^5.55",
     "svelte-check": "^4.4.8",
     "typescript": "~6.0.3",
-    "vite": "^8.0",
-    "@tauri-apps/cli": "^2.11"
+    "vite": "^8.0"
   }
 }

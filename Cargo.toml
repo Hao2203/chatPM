@@ -1,0 +1,7 @@
+[workspace]
+members = ["src-tauri"]
+resolver = "2"          # Tauri 2.x 需要 resolver = "2"
+
+[workspace.dependencies]
+serde = { version = "1", features = ["derive"] }
+tokio = { version = "1", features = [] }
