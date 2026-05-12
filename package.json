@@ -1,0 +1,29 @@
+{
+  "name": "chatpm",
+  "version": "0.1.0",
+  "description": "",
+  "type": "module",
+  "scripts": {
+    "dev": "vite dev",
+    "build": "vite build",
+    "preview": "vite preview",
+    "check": "svelte-kit sync && svelte-check --tsconfig ./tsconfig.json",
+    "check:watch": "svelte-kit sync && svelte-check --tsconfig ./tsconfig.json --watch",
+    "tauri": "tauri"
+  },
+  "license": "MIT",
+  "dependencies": {
+    "@tauri-apps/api": "^2.11.0",
+    "@tauri-apps/plugin-opener": "^2.5.4"
+  },
+  "devDependencies": {
+    "@sveltejs/adapter-static": "^3.0.10",
+    "@sveltejs/kit": "^2.59",
+    "@sveltejs/vite-plugin-svelte": "^7.1",
+    "svelte": "^5.55",
+    "svelte-check": "^4.4.8",
+    "typescript": "~6.0.3",
+    "vite": "^8.0",
+    "@tauri-apps/cli": "^2.11"
+  }
+}
