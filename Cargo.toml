@@ -1,7 +1,14 @@
 [workspace]
-members = ["src-tauri"]
-resolver = "2"          # Tauri 2.x 需要 resolver = "2"
+members = ["crates/chat_pm_database", "crates/chat_pm_deepseek", "src-tauri"]
+resolver = "2"                                                                # Tauri 2.x 需要 resolver = "2"
+
+[workspace.lints.clippy]
+dbg_macro = "warn"
 
 [workspace.dependencies]
+anyhow = "1"
+async-openai = { version = "0.38", features = ["_api"] }
+http = { version = "1" }
+secrecy = "0.10"
 serde = { version = "1", features = ["derive"] }
 tokio = { version = "1", features = [] }
