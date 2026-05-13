@@ -1,0 +1,16 @@
+[package]
+name = "chat_pm_commands"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+anyhow = { workspace = true }
+async-openai = { workspace = true }
+chat_pm_deepseek = { workspace = true }
+futures-lite = { workspace = true }
+http = { workspace = true }
+secrecy = { workspace = true }
+serde = { workspace = true }
+
+[lints]
+workspace = true
