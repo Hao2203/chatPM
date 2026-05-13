@@ -3,7 +3,7 @@ use futures_lite::{Stream, stream};
 
 use crate::State;
 
-pub async fn create_session(state: &State, name: &str) -> Result<i64> {
+pub async fn create_chat(state: &State, name: &str) -> Result<i64> {
     todo!()
 }
 

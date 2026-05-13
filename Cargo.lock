@@ -535,6 +535,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "chat_pm_conversation"
+version = "0.1.0"
+
+[[package]]
 name = "chat_pm_database"
 version = "0.1.0"
 
