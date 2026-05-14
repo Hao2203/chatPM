@@ -30,6 +30,7 @@ pub struct PipelineConfig {
     pub chat_model: String,
     pub embedding_model: String,
     pub token_limit: TokenCount,
+    pub reply_token_limit: TokenCount,
     pub short_term_turns: usize,
     pub long_term_top_k: usize,
     pub truncation_strategy: TruncationStrategy,
@@ -42,6 +43,7 @@ impl Default for PipelineConfig {
             chat_model: "deepseek-v4-flash".to_string(),
             embedding_model: "text-embedding-3-small".to_string(),
             token_limit: TokenCount(8192),
+            reply_token_limit: TokenCount(2048),
             short_term_turns: 6,
             long_term_top_k: 4,
             truncation_strategy: TruncationStrategy::ByRelevance,
@@ -269,7 +271,7 @@ impl ChatPipeline {
         let request = CreateChatCompletionRequestArgs::default()
             .model(self.config.chat_model.clone())
             .messages(api_messages)
-            .max_tokens(1024u32)
+            .max_tokens(self.config.reply_token_limit.0 as u32)
             .build()?;
 
         let response = self.client.chat().create(request).await?;

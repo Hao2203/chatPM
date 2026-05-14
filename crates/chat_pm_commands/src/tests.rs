@@ -8,7 +8,7 @@ use crate::session::{ChatPipeline, PipelineConfig};
 use chat_pm_database::MemoryDb;
 
 #[tokio::test]
-async fn main() -> Result<()> {
+async fn demo() -> Result<()> {
     logforth::starter_log::stdout()
         .filter(LevelFilter::MoreSevereEqual(Level::Debug))
         .layout(TextLayout::default())
@@ -31,9 +31,8 @@ async fn main() -> Result<()> {
     // 始终传 &handle，不需要手动传递 session_id 字符串
     let turns = [
         "你好",
-        "什么是 Rust 的所有权系统？",
-        "能用一个代码例子说明借用规则吗？",
-        "上面那个例子里，如果我需要多个可变引用怎么办？",
+        "Typescript 的语法跟 JavaScript 有什么区别？",
+        "Typescript 相比 JavaScript，有哪些好处？",
     ];
 
     for (i, user_input) in turns.iter().enumerate() {
@@ -56,14 +55,16 @@ async fn main() -> Result<()> {
 
     // ── 3. 模拟跨请求恢复（HTTP 无状态场景） ────────────────────────
     println!("{}", "═".repeat(60));
-    println!("模拟：新 HTTP 请求携带旧 session_id 恢复会话");
+    println!("(模拟：新 HTTP 请求携带旧 session_id 恢复会话)");
+    println!("用户：刚才我们聊到哪里了？");
+    println!("{}", "═".repeat(60));
 
     let saved_id = handle.id(); // 前端 cookie 中保存的值
 
     match pipeline.resume_session(saved_id) {
         Ok(resumed) => {
             let answer = pipeline.chat(&resumed, "刚才我们聊到哪里了？").await?;
-            println!("恢复后回复：{}", answer.display_text);
+            println!("助手：{}", answer.display_text);
         }
         Err(e) => eprintln!("恢复失败：{e}"),
     }
