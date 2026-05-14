@@ -231,16 +231,8 @@ pub fn clean(input: RawInput) -> CleanedInput {
     }
 }
 
-pub fn embed(input: CleanedInput, query_vector: Vector) -> EmbeddedQuery {
-    EmbeddedQuery {
-        text: input.text,
-        turn_id: input.turn_id,
-        query_vector,
-    }
-}
-
 pub fn retrieve_context(
-    query: EmbeddedQuery,
+    query: CleanedInput,
     short_term: Vec<MemoryChunk>,
     long_term: Vec<MemoryChunk>,
     system_prompt: SystemPrompt,
@@ -407,9 +399,8 @@ mod tests {
         });
         assert_eq!(step1.text, "Type State 模式如何应用？");
 
-        let step2 = embed(step1, Vector(vec![0.82, -0.14, 0.56]));
         let step3 = retrieve_context(
-            step2,
+            step1,
             vec![make_chunk(3, "什么是借用？", "借用是…", 1.0)],
             vec![make_chunk(1, "什么是所有权？", "所有权是…", 0.87)],
             SystemPrompt {

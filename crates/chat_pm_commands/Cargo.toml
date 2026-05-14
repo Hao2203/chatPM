@@ -6,11 +6,19 @@ edition = "2024"
 [dependencies]
 anyhow = { workspace = true }
 async-openai = { workspace = true }
+chat_pm_conversation = { workspace = true }
+chat_pm_database = { workspace = true }
 chat_pm_deepseek = { workspace = true }
+chrono = { workspace = true }
+dotenvy = { workspace = true }
 futures-lite = { workspace = true }
 http = { workspace = true }
+tracing = { workspace = true }
 secrecy = { workspace = true }
 serde = { workspace = true }
+uuid = { workspace = true }
 
-[lints]
-workspace = true
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["full"] }
+logforth = { workspace = true }
