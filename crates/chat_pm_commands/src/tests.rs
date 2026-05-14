@@ -58,9 +58,9 @@ async fn main() -> Result<()> {
     println!("{}", "═".repeat(60));
     println!("模拟：新 HTTP 请求携带旧 session_id 恢复会话");
 
-    let saved_id = handle.id().to_string(); // 前端 cookie 中保存的值
+    let saved_id = handle.id(); // 前端 cookie 中保存的值
 
-    match pipeline.resume_session(&saved_id) {
+    match pipeline.resume_session(saved_id) {
         Ok(resumed) => {
             let answer = pipeline.chat(&resumed, "刚才我们聊到哪里了？").await?;
             println!("恢复后回复：{}", answer.display_text);

@@ -54,12 +54,21 @@ impl Default for PipelineConfig {
 // SessionHandle
 // ─────────────────────────────────────────
 
-#[derive(Debug, Clone)]
-pub struct SessionHandle(String);
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub struct SessionId(Uuid);
+
+impl std::fmt::Display for SessionId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.0)
+    }
+}
+
+#[derive(Debug)]
+pub struct SessionHandle(Uuid);
 
 impl SessionHandle {
-    pub fn id(&self) -> &str {
-        &self.0
+    pub fn id(&self) -> SessionId {
+        SessionId(self.0)
     }
 }
 
@@ -94,9 +103,9 @@ impl ChatPipeline {
     }
 
     pub fn create_session(&self) -> SessionHandle {
-        let session_id = Uuid::now_v7().to_string();
+        let session_id = Uuid::now_v7();
         self.db.upsert_session(SessionRecord {
-            session_id: session_id.clone(),
+            session_id: session_id.to_string(),
             created_at: Utc::now(),
             user_persona: None, // user_persona 已移除
         });
@@ -104,17 +113,17 @@ impl ChatPipeline {
         SessionHandle(session_id)
     }
 
-    pub fn resume_session(&self, session_id: &str) -> Result<SessionHandle> {
+    pub fn resume_session(&self, session_id: SessionId) -> Result<SessionHandle> {
         self.db
-            .get_session(session_id)
-            .map(|_| SessionHandle(session_id.to_string()))
+            .get_session(&session_id.to_string())
+            .map(|_| SessionHandle(session_id.0))
             .ok_or_else(|| anyhow!("session '{}' 不存在", session_id))
     }
 
     #[instrument(skip(self, handle, user_text), fields(session_id = %handle, user_text = %user_text))]
     pub async fn chat(&self, handle: &SessionHandle, user_text: &str) -> Result<FinalAnswer> {
         let session_id = handle.id();
-        let turn_id = self.db.next_turn_id(session_id);
+        let turn_id = self.db.next_turn_id(&session_id.to_string());
 
         info!(turn = turn_id.0, "开始处理");
 
@@ -125,7 +134,7 @@ impl ChatPipeline {
         // ── Step 2: 短期记忆 ───────────────────────────────────────────
         let recent_records = self
             .db
-            .recent_turns(session_id, self.config.short_term_turns);
+            .recent_turns(&session_id.to_string(), self.config.short_term_turns);
         let short_term_ids: Vec<TurnId> = recent_records.iter().map(|r| r.turn_id).collect();
         let short_term: Vec<MemoryChunk> = recent_records
             .iter()
@@ -137,7 +146,7 @@ impl ChatPipeline {
         let long_term: Vec<MemoryChunk> = self
             .db
             .semantic_search(
-                session_id,
+                &session_id.to_string(),
                 &[],
                 self.config.long_term_top_k,
                 &short_term_ids,
