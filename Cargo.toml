@@ -26,7 +26,7 @@ chrono = { version = "0.4", features = ["serde"] }
 dotenvy = "0.15"
 futures-lite = "2.6"
 logforth = { version = "0.29", features = ["bridge-log", "layout-text"] }
-tracing = { version = "0.1", features = [] }
+tracing = { version = "0.1", features = ["log"] }
 http = { version = "1" }
 secrecy = "0.10"
 serde = { version = "1", features = ["derive"] }

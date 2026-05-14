@@ -124,8 +124,8 @@ impl ChatPipeline {
 
     #[instrument(skip(self, handle, user_text), fields(session_id = %handle, user_text = %user_text))]
     pub async fn chat(&self, handle: &SessionHandle, user_text: &str) -> Result<FinalAnswer> {
-        let session_id = handle.id();
-        let turn_id = self.db.next_turn_id(&session_id.to_string());
+        let session_id = handle.id().to_string();
+        let turn_id = self.db.next_turn_id(&session_id);
 
         info!(turn = turn_id.0, "开始处理");
 
@@ -136,7 +136,7 @@ impl ChatPipeline {
         // ── Step 2: 短期记忆 ───────────────────────────────────────────
         let recent_records = self
             .db
-            .recent_turns(&session_id.to_string(), self.config.short_term_turns);
+            .recent_turns(&session_id, self.config.short_term_turns);
         let short_term_ids: Vec<TurnId> = recent_records.iter().map(|r| r.turn_id).collect();
         let short_term: Vec<MemoryChunk> = recent_records
             .iter()
@@ -148,7 +148,7 @@ impl ChatPipeline {
         let long_term: Vec<MemoryChunk> = self
             .db
             .semantic_search(
-                &session_id.to_string(),
+                &session_id,
                 &[],
                 self.config.long_term_top_k,
                 &short_term_ids,

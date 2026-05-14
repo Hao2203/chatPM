@@ -25,7 +25,6 @@ async fn demo() -> Result<()> {
     let handle = pipeline.create_session();
 
     println!("会话已创建，session_id = {}", handle.id());
-    println!("（前端应保存此 ID，下次通过 resume_session 恢复）\n");
 
     // ── 2. 模拟多轮对话 ─────────────────────────────────────────────
     // 始终传 &handle，不需要手动传递 session_id 字符串
