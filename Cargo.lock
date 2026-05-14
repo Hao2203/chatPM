@@ -546,6 +546,9 @@ dependencies = [
 [[package]]
 name = "chat_pm_conversation"
 version = "0.1.0"
+dependencies = [
+ "derive_more",
+]
 
 [[package]]
 name = "chat_pm_database"

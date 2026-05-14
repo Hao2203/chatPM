@@ -1,4 +1,20 @@
+use derive_more::Into;
+
 use crate::Role;
+
+#[derive(Debug, Clone, Into)]
+pub struct UserInput(String);
+
+impl UserInput {
+    pub fn new(content: &str) -> Self {
+        let content = content.split_whitespace().collect::<Vec<_>>().join(" ");
+        Self(content)
+    }
+
+    pub fn into_inner(self) -> String {
+        self.0
+    }
+}
 
 #[derive(Debug, Clone)]
 pub struct ChatMessage {
