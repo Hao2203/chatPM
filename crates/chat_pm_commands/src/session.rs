@@ -9,11 +9,13 @@ use async_openai::{
 };
 use chat_pm_database::{MemoryDb, SessionRecord, TurnRecord};
 use chrono::Utc;
+use futures_lite::{Stream, StreamExt};
+use tokio::sync::mpsc;
 use tracing::{debug, info};
 use uuid::Uuid;
 
 use chat_pm_conversation::{
-    chat::{self, FinalAnswer, ReplyReceiver, Role, StopReason},
+    chat::{MessageFrame, ReplyReceiver, Role, StopReason},
     context::Context,
     memory::Memory,
     message::{ChatMessage, UserInput},
@@ -115,7 +117,11 @@ impl ChatPipeline {
             .ok_or_else(|| anyhow!("session '{}' 不存在", session_id))
     }
 
-    pub async fn chat(&self, handle: &SessionHandle, user_input: UserInput) -> Result<FinalAnswer> {
+    pub async fn chat(
+        &self,
+        handle: &SessionHandle,
+        user_input: UserInput,
+    ) -> Result<mpsc::Receiver<Result<MessageFrame>>> {
         let session_id = handle.id().to_string();
         let turn_id = self.db.next_turn_id(&session_id);
 
@@ -144,36 +150,60 @@ impl ChatPipeline {
 
         debug!(msgs = messages.len(), "Prompt 组装完成");
 
-        let (raw_text, completion_tokens, stop_reason) = self
+        let stream = self
             .call_chat_api(&messages)
             .await
             .context("Chat 补全失败")?;
-        info!(tokens = completion_tokens, "模型回复完成");
+        let (tx, rx) = mpsc::channel(10);
 
-        let mut receiver = ReplyReceiver::new();
-        receiver.receive(&raw_text);
-        let llm_response = receiver.finish(stop_reason, completion_tokens);
-        let answer = chat::finalize(llm_response);
+        let db = self.db.clone();
+        tokio::spawn(async move {
+            let mut receiver = ReplyReceiver::new();
+            let mut stop_reason_result = StopReason::MaxTokens;
+            let mut completion_tokens_result = 0;
+            stream
+                .then(|result| {
+                    let frame = || {
+                        let (raw_text, completion_tokens, stop_reason) = result?;
 
-        self.db.append_turn(TurnRecord {
-            turn_id,
-            session_id: session_id.to_string(),
-            user_text: user_input.into(),
-            assistant_text: answer.display_text.clone(),
-            created_at: Utc::now(),
+                        if let Some(stop_reason) = stop_reason {
+                            stop_reason_result = stop_reason;
+                        }
+                        completion_tokens_result = completion_tokens;
+
+                        Ok(receiver.receive(&raw_text))
+                    };
+
+                    tx.send(frame())
+                })
+                .for_each(|_| {})
+                .await;
+
+            let answer = receiver.finish(stop_reason_result, completion_tokens_result);
+
+            db.append_turn(TurnRecord {
+                turn_id,
+                session_id: session_id.to_string(),
+                user_text: user_input.into(),
+                assistant_text: answer.display_text.clone(),
+                created_at: Utc::now(),
+            });
+
+            let stats = db.stats();
+            info!(
+                sessions = stats.session_count,
+                total_turns = stats.total_turn_count,
+                "记忆写回完成"
+            );
         });
 
-        let stats = self.db.stats();
-        info!(
-            sessions = stats.session_count,
-            total_turns = stats.total_turn_count,
-            "记忆写回完成"
-        );
-
-        Ok(answer)
+        Ok(rx)
     }
 
-    async fn call_chat_api(&self, messages: &[ChatMessage]) -> Result<(String, usize, StopReason)> {
+    async fn call_chat_api(
+        &self,
+        messages: &[ChatMessage],
+    ) -> Result<impl Stream<Item = Result<(String, usize, Option<StopReason>)>> + 'static> {
         // 把 chat::ChatMessage 转换为 async_openai 的类型
         let api_messages: Vec<ChatCompletionRequestMessage> = messages
             .iter()
@@ -201,25 +231,31 @@ impl ChatPipeline {
             .max_tokens(self.config.reply_token_limit as u32)
             .build()?;
 
-        let response = self.client.chat().create(request).await?;
-        let choice = response
-            .choices
-            .into_iter()
-            .next()
-            .context("模型未返回 choice")?;
+        let stream = self.client.chat().create_stream(request).await?;
+        let stream = stream.map(|result| {
+            let response = result?;
 
-        let raw_text = choice.message.content.unwrap_or_default();
-        let completion_tokens = response
-            .usage
-            .map(|u| u.completion_tokens as usize)
-            .unwrap_or(0);
-        let stop_reason = match choice.finish_reason {
-            Some(FinishReason::Stop) => StopReason::EndOfSequence,
-            Some(FinishReason::Length) => StopReason::MaxTokens,
-            Some(FinishReason::ContentFilter) => StopReason::ContentFilter,
-            _ => StopReason::EndOfSequence,
-        };
+            let choice = response
+                .choices
+                .into_iter()
+                .next()
+                .context("模型未返回 choice")?;
 
-        Ok((raw_text, completion_tokens, stop_reason))
+            let raw_text = choice.delta.content.unwrap_or_default();
+            let completion_tokens = response
+                .usage
+                .map(|u| u.completion_tokens as usize)
+                .unwrap_or(0);
+            let stop_reason = choice.finish_reason.map(|r| match r {
+                FinishReason::Stop => StopReason::EndOfSequence,
+                FinishReason::Length => StopReason::MaxTokens,
+                FinishReason::ContentFilter => StopReason::ContentFilter,
+                _ => StopReason::EndOfSequence,
+            });
+
+            Ok((raw_text, completion_tokens, stop_reason))
+        });
+
+        Ok(stream)
     }
 }

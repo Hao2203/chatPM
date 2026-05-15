@@ -15,6 +15,10 @@ pub enum StopReason {
     ContentFilter,
 }
 
+pub struct MessageFrame {
+    pub content: String,
+}
+
 #[derive(Debug, Default)]
 pub struct ReplyReceiver {
     content: String,
@@ -25,24 +29,29 @@ impl ReplyReceiver {
         Self::default()
     }
 
-    pub fn receive(&mut self, text: &str) {
+    pub fn receive(&mut self, text: &str) -> MessageFrame {
         self.content.push_str(text);
-    }
-
-    pub fn finish(self, stop_reason: StopReason, completion_tokens: usize) -> LlmResponse {
-        LlmResponse {
-            raw_text: self.content,
-            completion_tokens,
-            stop_reason,
+        MessageFrame {
+            content: text.into(),
         }
     }
-}
 
-#[derive(Debug)]
-pub struct LlmResponse {
-    pub raw_text: String,
-    pub completion_tokens: usize,
-    pub stop_reason: StopReason,
+    pub fn finish(self, stop_reason: StopReason, completion_tokens: usize) -> FinalAnswer {
+        let truncation_warning = if stop_reason == StopReason::MaxTokens {
+            Some("回答因长度限制被截断，请尝试更具体的问题。".to_string())
+        } else {
+            None
+        };
+
+        FinalAnswer {
+            display_text: self.content.clone(),
+            truncation_warning,
+            memory_update_plan: MemoryUpdatePlan {
+                content_to_store: self.content,
+            },
+            completion_tokens,
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -52,23 +61,8 @@ pub struct MemoryUpdatePlan {
 
 #[derive(Debug)]
 pub struct FinalAnswer {
+    pub completion_tokens: usize,
     pub display_text: String,
     pub truncation_warning: Option<String>,
     pub memory_update_plan: MemoryUpdatePlan,
-}
-
-pub fn finalize(response: LlmResponse) -> FinalAnswer {
-    let truncation_warning = if response.stop_reason == StopReason::MaxTokens {
-        Some("回答因长度限制被截断，请尝试更具体的问题。".to_string())
-    } else {
-        None
-    };
-
-    FinalAnswer {
-        display_text: response.raw_text.clone(),
-        truncation_warning,
-        memory_update_plan: MemoryUpdatePlan {
-            content_to_store: response.raw_text,
-        },
-    }
 }

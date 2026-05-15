@@ -1,3 +1,5 @@
+use std::{io::Write, time::Duration};
+
 use anyhow::Result;
 use chat_pm_conversation::message::UserInput;
 use logforth::{
@@ -11,7 +13,7 @@ use chat_pm_database::MemoryDb;
 #[tokio::test]
 async fn demo() -> Result<()> {
     logforth::starter_log::stdout()
-        .filter(LevelFilter::MoreSevereEqual(Level::Debug))
+        .filter(LevelFilter::MoreSevereEqual(Level::Info))
         .layout(TextLayout::default())
         .apply();
     dotenvy::dotenv()?;
@@ -31,8 +33,8 @@ async fn demo() -> Result<()> {
     // 始终传 &handle，不需要手动传递 session_id 字符串
     let turns = [
         "你好",
-        "Typescript 的语法跟 JavaScript 有什么区别？",
-        "Typescript 相比 JavaScript，有哪些好处？",
+        "帮我规划日本旅行，我喜欢二次元和乡村，先推荐第一天。",
+        "帮我规划日本旅行，我喜欢二次元和乡村，再推荐第二天。",
     ];
 
     for (i, user_input) in turns.iter().enumerate() {
@@ -40,14 +42,13 @@ async fn demo() -> Result<()> {
         println!("轮次 {} 用户：{}", i + 1, user_input);
         println!("{}", "─".repeat(60));
 
-        match pipeline.chat(&handle, UserInput::new(user_input)).await {
-            Ok(answer) => {
-                println!("助手：{}", answer.display_text);
-                if let Some(warn) = &answer.truncation_warning {
-                    println!("⚠️  {warn}");
-                }
-            }
-            Err(e) => eprintln!("❌ 错误：{e:#}"),
+        let mut stream = pipeline.chat(&handle, UserInput::new(user_input)).await?;
+        print!("助手：");
+        while let Some(Ok(frame)) = stream.recv().await {
+            print(&frame.content);
+            // if let Some(warn) = &answer.truncation_warning {
+            //     println!("⚠️  {warn}");
+            // }
         }
 
         println!();
@@ -63,13 +64,27 @@ async fn demo() -> Result<()> {
 
     match pipeline.resume_session(saved_id) {
         Ok(resumed) => {
-            let answer = pipeline
+            let mut stream = pipeline
                 .chat(&resumed, UserInput::new("刚才我们聊到哪里了？"))
                 .await?;
-            println!("助手：{}", answer.display_text);
+            print!("助手：");
+            while let Some(Ok(frame)) = stream.recv().await {
+                print!("{}", frame.content);
+                // if let Some(warn) = &answer.truncation_warning {
+                //     println!("⚠️  {warn}");
+                // }
+            }
         }
         Err(e) => eprintln!("恢复失败：{e}"),
     }
 
     Ok(())
+}
+
+fn print(s: &str) {
+    for c in s.chars() {
+        print!("{}", c);
+        std::io::stdout().flush().unwrap();
+        std::thread::sleep(Duration::from_millis(20));
+    }
 }
