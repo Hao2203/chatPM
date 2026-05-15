@@ -1,5 +1,4 @@
 use crate::{
-    TurnId,
     context::Context,
     language::Language,
     message::{ChatMessage, UserInput},
@@ -41,12 +40,7 @@ impl PromptComposer {
         Self { system_prompt }
     }
 
-    pub fn compose_prompt(
-        &self,
-        turn_id: TurnId,
-        ctx: Context,
-        user_input: UserInput,
-    ) -> PromptMessages {
+    pub fn compose_prompt(&self, ctx: Context, user_input: UserInput) -> Vec<ChatMessage> {
         let mut messages = if ctx.recent_memory.is_empty() {
             vec![self.system_prompt.to_message()]
         } else {
@@ -65,12 +59,6 @@ impl PromptComposer {
 
         messages.push(ChatMessage::user(user_input.into_inner()));
 
-        PromptMessages { turn_id, messages }
+        messages
     }
-}
-
-#[derive(Debug)]
-pub struct PromptMessages {
-    pub turn_id: TurnId,
-    pub messages: Vec<ChatMessage>,
 }

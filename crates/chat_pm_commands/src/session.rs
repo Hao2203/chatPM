@@ -13,7 +13,7 @@ use tracing::{debug, info};
 use uuid::Uuid;
 
 use chat_pm_conversation::{
-    chat::{self, FinalAnswer, LlmResponse, Role, StopReason},
+    chat::{self, FinalAnswer, ReplyReceiver, Role, StopReason},
     context::Context,
     memory::Memory,
     message::{ChatMessage, UserInput},
@@ -140,26 +140,23 @@ impl ChatPipeline {
             recent_memory,
         };
         let composer = PromptComposer::new(system_prompt);
-        let step4 = composer.compose_prompt(turn_id, ctx, user_input.clone());
+        let messages = composer.compose_prompt(ctx, user_input.clone());
 
-        debug!(msgs = step4.messages.len(), "Prompt 组装完成");
+        debug!(msgs = messages.len(), "Prompt 组装完成");
 
         let (raw_text, completion_tokens, stop_reason) = self
-            .call_chat_api(&step4.messages)
+            .call_chat_api(&messages)
             .await
             .context("Chat 补全失败")?;
         info!(tokens = completion_tokens, "模型回复完成");
 
-        let llm_response = LlmResponse {
-            turn_id,
-            raw_text,
-            completion_tokens,
-            stop_reason,
-        };
+        let mut receiver = ReplyReceiver::new();
+        receiver.receive(&raw_text);
+        let llm_response = receiver.finish(stop_reason, completion_tokens);
         let answer = chat::finalize(llm_response);
 
         self.db.append_turn(TurnRecord {
-            turn_id: answer.turn_id,
+            turn_id,
             session_id: session_id.to_string(),
             user_text: user_input.into(),
             assistant_text: answer.display_text.clone(),
