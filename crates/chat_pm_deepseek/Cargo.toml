@@ -5,7 +5,10 @@ edition = "2024"
 
 [dependencies]
 anyhow = { workspace = true }
-async-openai = { workspace = true }
-http = { workspace = true }
+chat_pm_conversation = { workspace = true }
+futures-lite = { workspace = true }
+reqwest = { workspace = true }
 secrecy = { workspace = true }
 serde = { workspace = true }
+serde_json = { workspace = true }
+tokio = { workspace = true }

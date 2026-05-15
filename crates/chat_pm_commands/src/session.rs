@@ -1,25 +1,14 @@
-use anyhow::{Context as _, Result, anyhow};
-use async_openai::{
-    Client,
-    types::chat::{
-        ChatCompletionRequestAssistantMessageArgs, ChatCompletionRequestMessage,
-        ChatCompletionRequestSystemMessageArgs, ChatCompletionRequestUserMessageArgs,
-        CreateChatCompletionRequest, CreateChatCompletionRequestArgs, FinishReason,
-    },
-};
-use chat_pm_database::{MemoryDb, SessionRecord, TurnRecord};
-use chrono::Utc;
-use futures_lite::{Stream, StreamExt};
-use serde::Serialize;
+use anyhow::{Result, anyhow};
+use chat_pm_database::MemoryDb;
+use chat_pm_deepseek::{ChatRequestConfig, Client as DeepseekClient, ReasoningEffort};
 use tokio::sync::mpsc;
 use tracing::{debug, info};
 use uuid::Uuid;
 
 use chat_pm_conversation::{
-    chat::{MessageFrame, ReplyReceiver, Role, StopReason},
+    chat::{MessageFrame, ReplyReceiver, StopReason},
     context::Context,
-    memory::Memory,
-    message::{ChatMessage, UserInput},
+    message::{UserInput},
     prompt::{PromptComposer, SystemPrompt},
 };
 
@@ -32,6 +21,30 @@ pub struct PipelineConfig {
     pub short_term_turns: usize,
     pub long_term_top_k: usize,
     pub system_role: String,
+    pub thinking_enabled: bool,
+    pub reasoning_effort: Option<ReasoningEffort>,
+}
+
+impl PipelineConfig {
+    pub fn validate(&self) -> Result<()> {
+        if self.reply_token_limit == 0 {
+            return Err(anyhow!("reply_token_limit must be > 0"));
+        }
+        Ok(())
+    }
+
+    pub fn set_reasoning_effort_from_str(&mut self, value: &str) -> Result<()> {
+        self.reasoning_effort = Some(ReasoningEffort::parse(value)?);
+        Ok(())
+    }
+
+    pub fn load_from_env(mut self) -> Result<Self> {
+        if let Ok(value) = std::env::var("CHAT_PM_REASONING_EFFORT") {
+            self.set_reasoning_effort_from_str(&value)?;
+        }
+        self.validate()?;
+        Ok(self)
+    }
 }
 
 impl Default for PipelineConfig {
@@ -44,13 +57,11 @@ impl Default for PipelineConfig {
             short_term_turns: 6,
             long_term_top_k: 4,
             system_role: "你是一名智能助手，能够记住对话历史并提供连贯的回答。".to_string(),
+            thinking_enabled: false,
+            reasoning_effort: None,
         }
     }
 }
-
-// ─────────────────────────────────────────
-// SessionHandle
-// ─────────────────────────────────────────
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub struct SessionId(Uuid);
@@ -76,46 +87,37 @@ impl std::fmt::Display for SessionHandle {
     }
 }
 
-// ─────────────────────────────────────────
-// 流程编排器
-// ─────────────────────────────────────────
-
 #[derive(Clone)]
 pub struct ChatPipeline {
-    client: Client<chat_pm_deepseek::Config>,
+    client: DeepseekClient,
     db: MemoryDb,
     config: PipelineConfig,
 }
 
 impl ChatPipeline {
-    pub fn new(db: MemoryDb, config: PipelineConfig) -> Self {
-        let api_key = std::env::var("DEEPSEEK_API_KEY").expect("DEEPSEEK_API_KEY");
-        let deepseek_config = chat_pm_deepseek::Config {
-            api_key: chat_pm_deepseek::ApiKey::new(api_key).unwrap(),
-        };
-        Self {
-            client: Client::with_config(deepseek_config),
-            db,
-            config,
-        }
+    pub fn new(db: MemoryDb, client: DeepseekClient, config: PipelineConfig) -> Result<Self> {
+        config.validate()?;
+        Ok(Self { client, db, config })
+    }
+
+    pub fn with_default_deepseek(db: MemoryDb, config: PipelineConfig) -> Result<Self> {
+        let client = DeepseekClient::from_env()?;
+        Self::new(db, client, config)
     }
 
     pub fn create_session(&self) -> SessionHandle {
         let session_id = Uuid::now_v7();
-        self.db.upsert_session(SessionRecord {
-            session_id: session_id.to_string(),
-            created_at: Utc::now(),
-            user_persona: None, // user_persona 已移除
-        });
+        self.db.create_session(&session_id.to_string());
         info!(%session_id, "新会话已创建");
         SessionHandle(session_id)
     }
 
     pub fn resume_session(&self, session_id: SessionId) -> Result<SessionHandle> {
-        self.db
-            .get_session(&session_id.to_string())
-            .map(|_| SessionHandle(session_id.0))
-            .ok_or_else(|| anyhow!("session '{}' 不存在", session_id))
+        if self.db.session_exists(&session_id.to_string()) {
+            Ok(SessionHandle(session_id.0))
+        } else {
+            Err(anyhow!("session '{}' 不存在", session_id))
+        }
     }
 
     pub async fn chat(
@@ -124,17 +126,11 @@ impl ChatPipeline {
         user_input: UserInput,
     ) -> Result<mpsc::Receiver<Result<MessageFrame>>> {
         let session_id = handle.id().to_string();
-        let turn_id = self.db.next_turn_id(&session_id);
+        info!(%session_id, "开始处理");
 
-        info!(turn = turn_id.0, "开始处理");
-
-        let recent_records = self
+        let recent_memory = self
             .db
-            .recent_turns(&session_id, self.config.short_term_turns);
-        let recent_memory: Vec<Memory> = recent_records
-            .iter()
-            .map(TurnRecord::to_memory_chunk)
-            .collect();
+            .load_recent_memory(&session_id, self.config.short_term_turns);
         debug!(count = recent_memory.len(), "短期记忆加载完成");
 
         let system_prompt = SystemPrompt {
@@ -148,47 +144,45 @@ impl ChatPipeline {
         };
         let composer = PromptComposer::new(system_prompt);
         let messages = composer.compose_prompt(ctx, user_input.clone());
-
         debug!(msgs = messages.len(), "Prompt 组装完成");
 
-        let stream = self
-            .call_chat_api(&messages)
-            .await
-            .context("Chat 补全失败")?;
-        let (tx, rx) = mpsc::channel(10);
+        let mut stream = self
+            .client
+            .stream_chat(
+                &ChatRequestConfig {
+                    model: self.config.chat_model.clone(),
+                    max_tokens: self.config.reply_token_limit,
+                    thinking_enabled: self.config.thinking_enabled,
+                    reasoning_effort: self.config.reasoning_effort,
+                },
+                &messages,
+            )
+            .await?;
 
+        let (tx, rx) = mpsc::channel(10);
         let db = self.db.clone();
         tokio::spawn(async move {
             let mut receiver = ReplyReceiver::new();
             let mut stop_reason_result = StopReason::MaxTokens;
             let mut completion_tokens_result = 0;
-            stream
-                .then(|result| {
-                    let frame = || {
-                        let (raw_text, completion_tokens, stop_reason) = result?;
 
-                        if let Some(stop_reason) = stop_reason {
-                            stop_reason_result = stop_reason;
-                        }
-                        completion_tokens_result = completion_tokens;
+            while let Some(result) = stream.recv().await {
+                let frame = || {
+                    let chunk = result?;
+                    if let Some(stop_reason) = chunk.stop_reason {
+                        stop_reason_result = stop_reason;
+                    }
+                    completion_tokens_result = chunk.completion_tokens;
+                    Ok(receiver.receive(&chunk.raw_text))
+                };
 
-                        Ok(receiver.receive(&raw_text))
-                    };
-
-                    tx.send(frame())
-                })
-                .for_each(|_| {})
-                .await;
+                if tx.send(frame()).await.is_err() {
+                    return;
+                }
+            }
 
             let answer = receiver.finish(stop_reason_result, completion_tokens_result);
-
-            db.append_turn(TurnRecord {
-                turn_id,
-                session_id: session_id.to_string(),
-                user_text: user_input.into(),
-                assistant_text: answer.display_text.clone(),
-                created_at: Utc::now(),
-            });
+            db.append_chat_turn(&session_id, user_input.into(), answer.display_text.clone());
 
             let stats = db.stats();
             info!(
@@ -200,71 +194,4 @@ impl ChatPipeline {
 
         Ok(rx)
     }
-
-    async fn call_chat_api(
-        &self,
-        messages: &[ChatMessage],
-    ) -> Result<impl Stream<Item = Result<(String, usize, Option<StopReason>)>> + 'static> {
-        // 把 chat::ChatMessage 转换为 async_openai 的类型
-        let api_messages: Vec<ChatCompletionRequestMessage> = messages
-            .iter()
-            .map(|m| -> Result<ChatCompletionRequestMessage> {
-                Ok(match m.role {
-                    Role::System => ChatCompletionRequestSystemMessageArgs::default()
-                        .content(m.content.clone())
-                        .build()?
-                        .into(),
-                    Role::User => ChatCompletionRequestUserMessageArgs::default()
-                        .content(m.content.clone())
-                        .build()?
-                        .into(),
-                    Role::Assistant => ChatCompletionRequestAssistantMessageArgs::default()
-                        .content(m.content.clone())
-                        .build()?
-                        .into(),
-                })
-            })
-            .collect::<Result<_>>()?;
-
-        let request = CreateChatCompletionRequestArgs::default()
-            .model(self.config.chat_model.clone())
-            .messages(api_messages)
-            .max_tokens(self.config.reply_token_limit as u32)
-            .build()?;
-
-        let stream = self.client.chat().create_stream(request).await?;
-        let stream = stream.map(|result| {
-            let response = result?;
-
-            let choice = response
-                .choices
-                .into_iter()
-                .next()
-                .context("模型未返回 choice")?;
-
-            let raw_text = choice.delta.content.unwrap_or_default();
-            let completion_tokens = response
-                .usage
-                .map(|u| u.completion_tokens as usize)
-                .unwrap_or(0);
-            let stop_reason = choice.finish_reason.map(|r| match r {
-                FinishReason::Stop => StopReason::EndOfSequence,
-                FinishReason::Length => StopReason::MaxTokens,
-                FinishReason::ContentFilter => StopReason::ContentFilter,
-                _ => StopReason::EndOfSequence,
-            });
-
-            Ok((raw_text, completion_tokens, stop_reason))
-        });
-
-        Ok(stream)
-    }
-}
-
-#[derive(Debug, Serialize)]
-struct ChatCompletionRequest {
-    #[serde(flatten)]
-    inner: CreateChatCompletionRequest,
-    #[serde(flatten)]
-    extra_body: serde_json::Value,
 }

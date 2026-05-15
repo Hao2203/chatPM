@@ -15,10 +15,6 @@ use serde::{Deserialize, Serialize};
 
 use chat_pm_conversation::{chat::TurnId, memory::Memory};
 
-// ─────────────────────────────────────────
-// 数据记录定义
-// ─────────────────────────────────────────
-
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SessionRecord {
     pub session_id: String,
@@ -35,18 +31,12 @@ pub struct TurnRecord {
     pub created_at: DateTime<Utc>,
 }
 
-// ─────────────────────────────────────────
-// 内存数据库结构
-// ─────────────────────────────────────────
-
 #[derive(Debug, Default)]
 struct Inner {
     sessions: HashMap<String, SessionRecord>,
-    /// session_id → 按时间顺序排列的 TurnRecord
     turns: HashMap<String, Vec<TurnRecord>>,
 }
 
-/// 线程安全的内存数据库（`Arc<RwLock<...>>`）
 #[derive(Debug, Clone, Default)]
 pub struct MemoryDb {
     inner: Arc<RwLock<Inner>>,
@@ -57,9 +47,36 @@ impl MemoryDb {
         Self::default()
     }
 
-    // ── 会话操作 ──────────────────────────
+    pub fn create_session(&self, session_id: &str) {
+        self.upsert_session(SessionRecord {
+            session_id: session_id.to_string(),
+            created_at: Utc::now(),
+            user_persona: None,
+        });
+    }
 
-    /// 创建或更新会话
+    pub fn session_exists(&self, session_id: &str) -> bool {
+        self.get_session(session_id).is_some()
+    }
+
+    pub fn load_recent_memory(&self, session_id: &str, n: usize) -> Vec<Memory> {
+        self.recent_turns(session_id, n)
+            .into_iter()
+            .map(|x| x.to_memory_chunk())
+            .collect()
+    }
+
+    pub fn append_chat_turn(&self, session_id: &str, user_text: String, assistant_text: String) {
+        let turn_id = self.next_turn_id(session_id);
+        self.append_turn(TurnRecord {
+            turn_id,
+            session_id: session_id.to_string(),
+            user_text,
+            assistant_text,
+            created_at: Utc::now(),
+        });
+    }
+
     pub fn upsert_session(&self, record: SessionRecord) {
         let mut db = self.inner.write().unwrap();
         db.sessions.insert(record.session_id.clone(), record);
@@ -69,9 +86,6 @@ impl MemoryDb {
         self.inner.read().unwrap().sessions.get(session_id).cloned()
     }
 
-    // ── 轮次操作 ──────────────────────────
-
-    /// 追加一轮对话记录
     pub fn append_turn(&self, record: TurnRecord) {
         let mut db = self.inner.write().unwrap();
         db.turns
@@ -80,7 +94,6 @@ impl MemoryDb {
             .push(record);
     }
 
-    /// 取最近 `n` 轮对话（短期记忆）
     pub fn recent_turns(&self, session_id: &str, n: usize) -> Vec<TurnRecord> {
         let db = self.inner.read().unwrap();
         let turns = db
@@ -92,14 +105,12 @@ impl MemoryDb {
         turns[start..].to_vec()
     }
 
-    /// 返回当前会话的下一个 TurnId（自增）
     pub fn next_turn_id(&self, session_id: &str) -> TurnId {
         let db = self.inner.read().unwrap();
         let len = db.turns.get(session_id).map(|v| v.len()).unwrap_or(0);
         TurnId(len as u64 + 1)
     }
 
-    /// 统计信息（调试用）
     pub fn stats(&self) -> DbStats {
         let db = self.inner.read().unwrap();
         let total_turns: usize = db.turns.values().map(|v| v.len()).sum();
@@ -116,10 +127,6 @@ pub struct DbStats {
     pub total_turn_count: usize,
 }
 
-// ─────────────────────────────────────────
-// TurnRecord → MemoryChunk
-// ─────────────────────────────────────────
-
 impl TurnRecord {
     pub fn to_memory_chunk(&self) -> Memory {
         Memory {
@@ -129,11 +136,6 @@ impl TurnRecord {
     }
 }
 
-// ─────────────────────────────────────────
-// 工具函数
-// ─────────────────────────────────────────
-
-/// 余弦相似度，向量长度不同时截断到较短者
 pub fn cosine_similarity(a: &[f32], b: &[f32]) -> f32 {
     let len = a.len().min(b.len());
     if len == 0 {

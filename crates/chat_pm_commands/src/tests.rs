@@ -20,7 +20,7 @@ async fn demo() -> Result<()> {
 
     let db = MemoryDb::new();
     let config = PipelineConfig::default();
-    let pipeline = ChatPipeline::new(db, config);
+    let pipeline = ChatPipeline::with_default_deepseek(db, config)?;
 
     // ── 1. 创建会话，获取凭证 ───────────────────────────────────────
     let handle = pipeline.create_session();
@@ -82,6 +82,6 @@ fn print(s: &str) {
     for c in s.chars() {
         print!("{}", c);
         std::io::stdout().flush().unwrap();
-        std::thread::sleep(Duration::from_millis(20));
+        std::thread::sleep(Duration::from_millis(10));
     }
 }
