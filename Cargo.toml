@@ -13,7 +13,11 @@ dbg_macro = "warn"
 
 [workspace.dependencies]
 anyhow = "1"
-async-openai = { version = "0.38", features = ["_api", "chat-completion"] }
+async-openai = { version = "0.38", features = [
+    "_api",
+    "chat-completion",
+    "byot"
+] }
 chat_pm_conversation = { path = "crates/chat_pm_conversation" }
 chat_pm_database = { path = "crates/chat_pm_database" }
 chat_pm_deepseek = { path = "crates/chat_pm_deepseek" }
@@ -27,6 +31,7 @@ tracing = { version = "0.1", features = ["log"] }
 http = { version = "1" }
 secrecy = "0.10"
 serde = { version = "1", features = ["derive"] }
+serde_json = "1"
 thiserror = { version = "2" }
 tokio = { version = "1", features = [] }
 uuid = { version = "1", features = ["serde", "v7"] }

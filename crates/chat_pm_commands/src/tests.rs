@@ -23,14 +23,11 @@ async fn demo() -> Result<()> {
     let pipeline = ChatPipeline::new(db, config);
 
     // ── 1. 创建会话，获取凭证 ───────────────────────────────────────
-    // create_session 是 session_id 的唯一来源，返回 SessionHandle。
-    // handle.id() 暴露底层字符串，供 HTTP 响应头 / cookie 返回给前端。
     let handle = pipeline.create_session();
 
     println!("会话已创建，session_id = {}", handle.id());
 
     // ── 2. 模拟多轮对话 ─────────────────────────────────────────────
-    // 始终传 &handle，不需要手动传递 session_id 字符串
     let turns = [
         "你好",
         "帮我规划日本旅行，我喜欢二次元和乡村，先推荐第一天。",

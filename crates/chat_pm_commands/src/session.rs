@@ -4,12 +4,13 @@ use async_openai::{
     types::chat::{
         ChatCompletionRequestAssistantMessageArgs, ChatCompletionRequestMessage,
         ChatCompletionRequestSystemMessageArgs, ChatCompletionRequestUserMessageArgs,
-        CreateChatCompletionRequestArgs, FinishReason,
+        CreateChatCompletionRequest, CreateChatCompletionRequestArgs, FinishReason,
     },
 };
 use chat_pm_database::{MemoryDb, SessionRecord, TurnRecord};
 use chrono::Utc;
 use futures_lite::{Stream, StreamExt};
+use serde::Serialize;
 use tokio::sync::mpsc;
 use tracing::{debug, info};
 use uuid::Uuid;
@@ -258,4 +259,12 @@ impl ChatPipeline {
 
         Ok(stream)
     }
+}
+
+#[derive(Debug, Serialize)]
+struct ChatCompletionRequest {
+    #[serde(flatten)]
+    inner: CreateChatCompletionRequest,
+    #[serde(flatten)]
+    extra_body: serde_json::Value,
 }
