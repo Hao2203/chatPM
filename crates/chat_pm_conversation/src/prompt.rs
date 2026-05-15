@@ -65,10 +65,7 @@ impl PromptComposer {
 
         messages.push(ChatMessage::user(user_input.into_inner()));
 
-        PromptMessages {
-            turn_id,
-            messages: vec![self.system_prompt.to_message()],
-        }
+        PromptMessages { turn_id, messages }
     }
 }
 

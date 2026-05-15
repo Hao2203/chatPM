@@ -1,39 +1,33 @@
-/// # 异步流程编排层
-use anyhow::{Context, Result, anyhow};
+use anyhow::{Context as _, Result, anyhow};
 use async_openai::{
     Client,
-    types::{
-        chat::{
-            ChatCompletionRequestAssistantMessageArgs, ChatCompletionRequestMessage,
-            ChatCompletionRequestSystemMessageArgs, ChatCompletionRequestUserMessageArgs,
-            CreateChatCompletionRequestArgs, FinishReason,
-        },
-        embeddings::CreateEmbeddingRequest,
+    types::chat::{
+        ChatCompletionRequestAssistantMessageArgs, ChatCompletionRequestMessage,
+        ChatCompletionRequestSystemMessageArgs, ChatCompletionRequestUserMessageArgs,
+        CreateChatCompletionRequestArgs, FinishReason,
     },
 };
 use chat_pm_database::{MemoryDb, SessionRecord, TurnRecord};
 use chrono::Utc;
-use tracing::{debug, info, instrument};
+use tracing::{debug, info};
 use uuid::Uuid;
 
-use chat_pm_conversation::chat::{
-    self, ChatMessage, FinalAnswer, MemoryChunk, RawInput, Role, Similarity, StopReason,
-    SystemPrompt, TokenCount, TruncationStrategy, TurnId, Vector,
+use chat_pm_conversation::{
+    chat::{self, FinalAnswer, LlmResponse, Role, StopReason},
+    context::Context,
+    memory::Memory,
+    message::{ChatMessage, UserInput},
+    prompt::{PromptComposer, SystemPrompt},
 };
-
-// ─────────────────────────────────────────
-// 配置
-// ─────────────────────────────────────────
 
 #[derive(Debug, Clone)]
 pub struct PipelineConfig {
     pub chat_model: String,
     pub embedding_model: String,
-    pub token_limit: TokenCount,
-    pub reply_token_limit: TokenCount,
+    pub token_limit: usize,
+    pub reply_token_limit: usize,
     pub short_term_turns: usize,
     pub long_term_top_k: usize,
-    pub truncation_strategy: TruncationStrategy,
     pub system_role: String,
 }
 
@@ -42,11 +36,10 @@ impl Default for PipelineConfig {
         Self {
             chat_model: "deepseek-v4-flash".to_string(),
             embedding_model: "text-embedding-3-small".to_string(),
-            token_limit: TokenCount(8192),
-            reply_token_limit: TokenCount(2048),
+            token_limit: 8192,
+            reply_token_limit: 2048,
             short_term_turns: 6,
             long_term_top_k: 4,
-            truncation_strategy: TruncationStrategy::ByRelevance,
             system_role: "你是一名智能助手，能够记住对话历史并提供连贯的回答。".to_string(),
         }
     }
@@ -122,94 +115,54 @@ impl ChatPipeline {
             .ok_or_else(|| anyhow!("session '{}' 不存在", session_id))
     }
 
-    #[instrument(skip(self, handle, user_text), fields(session_id = %handle, user_text = %user_text))]
-    pub async fn chat(&self, handle: &SessionHandle, user_text: &str) -> Result<FinalAnswer> {
+    pub async fn chat(&self, handle: &SessionHandle, user_input: UserInput) -> Result<FinalAnswer> {
         let session_id = handle.id().to_string();
         let turn_id = self.db.next_turn_id(&session_id);
 
         info!(turn = turn_id.0, "开始处理");
 
-        // ── Step 1: Embedding ──────────────────────────────────────────
-        // let query_vector = self.embed_text(user_text).await.context("Embedding 失败")?;
-        // debug!(dim = query_vector.0.len(), "Embedding 完成");
-
-        // ── Step 2: 短期记忆 ───────────────────────────────────────────
         let recent_records = self
             .db
             .recent_turns(&session_id, self.config.short_term_turns);
-        let short_term_ids: Vec<TurnId> = recent_records.iter().map(|r| r.turn_id).collect();
-        let short_term: Vec<MemoryChunk> = recent_records
+        let recent_memory: Vec<Memory> = recent_records
             .iter()
-            .map(|r| TurnRecord::to_memory_chunk(r, Similarity(1.0)))
+            .map(TurnRecord::to_memory_chunk)
             .collect();
-        debug!(count = short_term.len(), "短期记忆加载完成");
+        debug!(count = recent_memory.len(), "短期记忆加载完成");
 
-        // ── Step 3: 长期记忆 ───────────────────────────────────────────
-        let long_term: Vec<MemoryChunk> = self
-            .db
-            .semantic_search(
-                &session_id,
-                &[],
-                self.config.long_term_top_k,
-                &short_term_ids,
-            )
-            .iter()
-            .map(|(r, sim)| TurnRecord::to_memory_chunk(r, *sim))
-            .collect();
-        debug!(count = long_term.len(), "长期记忆检索完成");
-
-        // ── Step 4: 系统 Prompt ────────────────────────────────────────
         let system_prompt = SystemPrompt {
             role_description: Some(self.config.system_role.clone()),
             ..SystemPrompt::default()
         };
 
-        // ── Step 5: Typestate 纯计算流程 ──────────────────────────────
-        let step1 = chat::clean(RawInput {
-            text: user_text.into(),
-            turn_id,
-        });
-        let step3 = chat::retrieve_context(step1, short_term, long_term, system_prompt);
-        let step4 = chat::assemble_prompt(
-            step3,
-            self.config.token_limit,
-            self.config.truncation_strategy.clone(),
-        );
+        let ctx = Context {
+            summary: None,
+            recent_memory,
+        };
+        let composer = PromptComposer::new(system_prompt);
+        let step4 = composer.compose_prompt(turn_id, ctx, user_input.clone());
 
-        if step4.was_truncated {
-            info!("上下文已裁剪，策略: {:?}", step4.truncation_strategy);
-        }
-        debug!(
-            tokens = step4.total_tokens.0,
-            msgs = step4.messages.len(),
-            "Prompt 组装完成"
-        );
+        debug!(msgs = step4.messages.len(), "Prompt 组装完成");
 
-        // ── Step 6: Chat 补全 ──────────────────────────────────────────
         let (raw_text, completion_tokens, stop_reason) = self
             .call_chat_api(&step4.messages)
             .await
             .context("Chat 补全失败")?;
-        info!(tokens = completion_tokens.0, "模型回复完成");
+        info!(tokens = completion_tokens, "模型回复完成");
 
-        // ── Step 7: 完成类型链 ─────────────────────────────────────────
-        let step5 =
-            chat::inject_llm_response(step4, raw_text.clone(), completion_tokens, stop_reason);
-        let answer = chat::finalize(step5);
-
-        // ── Step 8: 记忆写回 ───────────────────────────────────────────
-        let combined = format!("用户: {user_text}\n助手: {raw_text}");
-        let reply_embedding = self
-            .embed_text(&combined)
-            .await
-            .unwrap_or_else(|_| Vector(vec![]));
+        let llm_response = LlmResponse {
+            turn_id,
+            raw_text,
+            completion_tokens,
+            stop_reason,
+        };
+        let answer = chat::finalize(llm_response);
 
         self.db.append_turn(TurnRecord {
             turn_id: answer.turn_id,
             session_id: session_id.to_string(),
-            user_text: user_text.into(),
-            assistant_text: raw_text.clone(),
-            embedding: reply_embedding.0,
+            user_text: user_input.into(),
+            assistant_text: answer.display_text.clone(),
             created_at: Utc::now(),
         });
 
@@ -223,30 +176,7 @@ impl ChatPipeline {
         Ok(answer)
     }
 
-    // ── 私有：Embedding ───────────────────────────────────────────────
-
-    async fn embed_text(&self, text: &str) -> Result<Vector> {
-        let request = CreateEmbeddingRequest {
-            model: self.config.embedding_model.clone(),
-            input: text.into(),
-            ..Default::default()
-        };
-        let response = self.client.embeddings().create(request).await?;
-        let vec = response
-            .data
-            .into_iter()
-            .next()
-            .map(|e| e.embedding)
-            .unwrap_or_default();
-        Ok(Vector(vec))
-    }
-
-    // ── 私有：Chat 补全（直接传结构化消息列表）────────────────────────
-
-    async fn call_chat_api(
-        &self,
-        messages: &[ChatMessage],
-    ) -> Result<(String, TokenCount, StopReason)> {
+    async fn call_chat_api(&self, messages: &[ChatMessage]) -> Result<(String, usize, StopReason)> {
         // 把 chat::ChatMessage 转换为 async_openai 的类型
         let api_messages: Vec<ChatCompletionRequestMessage> = messages
             .iter()
@@ -271,7 +201,7 @@ impl ChatPipeline {
         let request = CreateChatCompletionRequestArgs::default()
             .model(self.config.chat_model.clone())
             .messages(api_messages)
-            .max_tokens(self.config.reply_token_limit.0 as u32)
+            .max_tokens(self.config.reply_token_limit as u32)
             .build()?;
 
         let response = self.client.chat().create(request).await?;
@@ -282,12 +212,10 @@ impl ChatPipeline {
             .context("模型未返回 choice")?;
 
         let raw_text = choice.message.content.unwrap_or_default();
-        let completion_tokens = TokenCount(
-            response
-                .usage
-                .map(|u| u.completion_tokens as usize)
-                .unwrap_or(0),
-        );
+        let completion_tokens = response
+            .usage
+            .map(|u| u.completion_tokens as usize)
+            .unwrap_or(0);
         let stop_reason = match choice.finish_reason {
             Some(FinishReason::Stop) => StopReason::EndOfSequence,
             Some(FinishReason::Length) => StopReason::MaxTokens,

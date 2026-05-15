@@ -13,7 +13,7 @@ use std::{
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
-use chat_pm_conversation::chat::{MemoryChunk, Similarity, TurnId};
+use chat_pm_conversation::{chat::TurnId, memory::Memory};
 
 // ─────────────────────────────────────────
 // 数据记录定义
@@ -32,8 +32,6 @@ pub struct TurnRecord {
     pub session_id: String,
     pub user_text: String,
     pub assistant_text: String,
-    /// Embedding 向量（存 f32 数组）
-    pub embedding: Vec<f32>,
     pub created_at: DateTime<Utc>,
 }
 
@@ -94,38 +92,6 @@ impl MemoryDb {
         turns[start..].to_vec()
     }
 
-    /// 语义检索：用余弦相似度找 Top-K 最相关轮次（长期记忆）
-    ///
-    /// 排除 `exclude_turn_ids` 中的轮次，避免短期记忆重复进入长期记忆。
-    pub fn semantic_search(
-        &self,
-        session_id: &str,
-        query_vec: &[f32],
-        top_k: usize,
-        exclude_turn_ids: &[TurnId],
-    ) -> Vec<(TurnRecord, Similarity)> {
-        let db = self.inner.read().unwrap();
-        let turns = match db.turns.get(session_id) {
-            Some(v) => v,
-            None => return vec![],
-        };
-
-        let mut scored: Vec<(TurnRecord, Similarity)> = turns
-            .iter()
-            .filter(|t| !exclude_turn_ids.contains(&t.turn_id))
-            .filter(|t| !t.embedding.is_empty())
-            .map(|t| {
-                let sim = cosine_similarity(query_vec, &t.embedding);
-                (t.clone(), Similarity(sim))
-            })
-            .collect();
-
-        // 按相似度降序排列
-        scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
-        scored.truncate(top_k);
-        scored
-    }
-
     /// 返回当前会话的下一个 TurnId（自增）
     pub fn next_turn_id(&self, session_id: &str) -> TurnId {
         let db = self.inner.read().unwrap();
@@ -155,12 +121,10 @@ pub struct DbStats {
 // ─────────────────────────────────────────
 
 impl TurnRecord {
-    pub fn to_memory_chunk(&self, relevance: Similarity) -> MemoryChunk {
-        MemoryChunk {
-            turn: self.turn_id,
+    pub fn to_memory_chunk(&self) -> Memory {
+        Memory {
             user_text: self.user_text.clone(),
             assistant_text: self.assistant_text.clone(),
-            relevance,
         }
     }
 }

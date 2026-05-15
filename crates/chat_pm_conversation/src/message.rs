@@ -1,3 +1,5 @@
+use core::fmt;
+
 use derive_more::Into;
 
 use crate::Role;
@@ -13,6 +15,12 @@ impl UserInput {
 
     pub fn into_inner(self) -> String {
         self.0
+    }
+}
+
+impl fmt::Display for UserInput {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self.0)
     }
 }
 

@@ -1,4 +1,5 @@
 use anyhow::Result;
+use chat_pm_conversation::message::UserInput;
 use logforth::{
     layout::TextLayout,
     record::{Level, LevelFilter},
@@ -39,7 +40,7 @@ async fn demo() -> Result<()> {
         println!("轮次 {} 用户：{}", i + 1, user_input);
         println!("{}", "─".repeat(60));
 
-        match pipeline.chat(&handle, user_input).await {
+        match pipeline.chat(&handle, UserInput::new(user_input)).await {
             Ok(answer) => {
                 println!("助手：{}", answer.display_text);
                 if let Some(warn) = &answer.truncation_warning {
@@ -62,7 +63,9 @@ async fn demo() -> Result<()> {
 
     match pipeline.resume_session(saved_id) {
         Ok(resumed) => {
-            let answer = pipeline.chat(&resumed, "刚才我们聊到哪里了？").await?;
+            let answer = pipeline
+                .chat(&resumed, UserInput::new("刚才我们聊到哪里了？"))
+                .await?;
             println!("助手：{}", answer.display_text);
         }
         Err(e) => eprintln!("恢复失败：{e}"),
