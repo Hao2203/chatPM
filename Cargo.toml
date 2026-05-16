@@ -14,11 +14,6 @@ dbg_macro = "warn"
 [workspace.dependencies]
 anyhow = "1"
 async-trait = "0.1"
-async-openai = { version = "0.38", features = [
-    "_api",
-    "chat-completion",
-    "byot"
-] }
 chat_pm_session = { path = "crates/chat_pm_session" }
 chat_pm_database = { path = "crates/chat_pm_database" }
 chat_pm_deepseek = { path = "crates/chat_pm_deepseek" }

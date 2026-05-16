@@ -8,14 +8,13 @@ use uuid::Uuid;
 use chat_pm_session::{
     chat::{MessageFrame, ReplyReceiver, StopReason},
     context::Context,
-    message::{UserInput},
+    message::UserInput,
     prompt::{PromptComposer, SystemPrompt},
 };
 
 #[derive(Debug, Clone)]
 pub struct PipelineConfig {
     pub chat_model: String,
-    pub embedding_model: String,
     pub token_limit: usize,
     pub reply_token_limit: usize,
     pub short_term_turns: usize,
@@ -51,7 +50,6 @@ impl Default for PipelineConfig {
     fn default() -> Self {
         Self {
             chat_model: "deepseek-v4-flash".to_string(),
-            embedding_model: "text-embedding-3-small".to_string(),
             token_limit: 8192,
             reply_token_limit: 2048,
             short_term_turns: 6,
