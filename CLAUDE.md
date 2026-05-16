@@ -181,12 +181,17 @@ struct AppState {
 
 Database is stored in Tauri's app data directory (`$DATA_DIR/chatpm.db`).
 
+### Configuration Persistence
+
+API key is stored in the `config` table of the SQLite database (`key="api_key"`). On startup, `setup()` attempts to load and validate the stored key, auto-initializing the pipeline if valid.
+
 ### Tauri Commands
 
 | Command | Input | Output | Notes |
 |---|---|---|---|
+| `check_api_key` | — | `bool` | Whether pipeline is ready |
 | `create_session` | — | `String` (session_id) | UUIDv7 |
-| `set_api_key` | `api_key: String` | `()` | Initializes ChatPipeline |
+| `set_api_key` | `api_key: String` | `()` | Validates, stores to DB, inits pipeline |
 | `send_message` | `session_id, content` | `()` | Emits events for streaming |
 | `list_sessions` | — | `Vec<SessionInfo>` | All sessions, newest first |
 | `get_turns` | `session_id` | `Vec<TurnInfo>` | All turns for session |

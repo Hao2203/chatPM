@@ -38,7 +38,24 @@ struct TurnInfo {
     assistant_text: String,
 }
 
+// ── Helper ──────────────────────────────────────────────────────────
+
+/// Try to build a ChatPipeline from a stored API key string.
+fn build_pipeline(db: &MemoryDb, raw_key: &str) -> Result<ChatPipeline, String> {
+    let key =
+        chat_pm_deepseek::ApiKey::new(raw_key).ok_or_else(|| "invalid API key".to_string())?;
+    let client = chat_pm_deepseek::Client::new(key);
+    let config = PipelineConfig::default();
+    ChatPipeline::new(db.clone(), client, config).map_err(|e| e.to_string())
+}
+
 // ── Commands ────────────────────────────────────────────────────────
+
+#[tauri::command]
+async fn check_api_key(state: State<'_, AppState>) -> Result<bool, String> {
+    let guard = state.pipeline.lock().await;
+    Ok(guard.is_some())
+}
 
 #[tauri::command]
 fn create_session(state: State<'_, AppState>) -> Result<String, String> {
@@ -50,18 +67,20 @@ fn create_session(state: State<'_, AppState>) -> Result<String, String> {
 
 #[tauri::command]
 fn set_api_key(state: State<'_, AppState>, api_key: String) -> Result<(), String> {
-    let key =
-        chat_pm_deepseek::ApiKey::new(&api_key).ok_or_else(|| "invalid API key".to_string())?;
-    let client = chat_pm_deepseek::Client::new(key);
-    let config = PipelineConfig::default();
-    let pipeline =
-        ChatPipeline::new(state.db.clone(), client, config).map_err(|e| e.to_string())?;
+    // Validate and build pipeline
+    let pipeline = build_pipeline(&state.db, &api_key)?;
+
+    // Persist to database
+    state.db.set_config("api_key", &api_key);
+
+    // Store in memory
     let mut guard = state
         .pipeline
         .try_lock()
         .map_err(|_| "locked".to_string())?;
     *guard = Some(pipeline);
-    tracing::info!("API key 已配置，pipeline 就绪");
+
+    tracing::info!("API key 已配置并持久化");
     Ok(())
 }
 
@@ -165,14 +184,24 @@ pub fn run() {
             let db = MemoryDb::open(&db_path).expect("open database");
             tracing::info!(path = %db_path.display(), "数据库已打开");
 
+            // Try to restore API key from previous session
+            let pipeline = db
+                .get_config("api_key")
+                .and_then(|raw_key| build_pipeline(&db, &raw_key).ok());
+
+            if pipeline.is_some() {
+                tracing::info!("已从数据库恢复 API key");
+            }
+
             app.manage(AppState {
                 db,
-                pipeline: Mutex::new(None),
+                pipeline: Mutex::new(pipeline),
             });
 
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
+            check_api_key,
             create_session,
             set_api_key,
             send_message,

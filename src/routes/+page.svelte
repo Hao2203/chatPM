@@ -133,7 +133,26 @@
     }
   }
 
+  let isComposing = $state(false);
+
+  function onInput(e: Event) {
+    if (!isComposing) {
+      inputText = (e.target as HTMLTextAreaElement).value;
+    }
+  }
+
+  function onCompositionStart() {
+    isComposing = true;
+  }
+
+  function onCompositionEnd(e: CompositionEvent) {
+    isComposing = false;
+    inputText = (e.target as HTMLTextAreaElement).value;
+  }
+
   function handleKeydown(e: KeyboardEvent) {
+    // Don't intercept Enter during IME composition
+    if (isComposing || e.isComposing || e.keyCode === 229) return;
     if (e.key === "Enter" && !e.shiftKey) {
       e.preventDefault();
       sendMessage();
@@ -142,6 +161,10 @@
 
   // ── Init ───────────────────────────────────────────────────
   $effect(() => {
+    // Check if API key is already configured from previous session
+    invoke<boolean>("check_api_key").then((ok) => {
+      apiKeyConfigured = ok;
+    });
     loadSessions();
   });
 </script>
@@ -196,16 +219,24 @@
       </div>
 
       <div class="input-area">
-        <textarea
-          bind:value={inputText}
-          onkeydown={handleKeydown}
-          placeholder="输入消息... (Enter 发送, Shift+Enter 换行)"
-          rows="1"
-          disabled={!apiKeyConfigured}
-        ></textarea>
-        <button class="btn btn-send" onclick={sendMessage} disabled={!apiKeyConfigured || !inputText.trim()}>
-          发送
-        </button>
+        {#if !apiKeyConfigured}
+          <div class="apikey-hint">
+            请先<a href="#" onclick={(e) => { e.preventDefault(); showSettings = true; }}>配置 API Key</a>后再发送消息
+          </div>
+        {:else}
+          <textarea
+            value={inputText}
+            oninput={onInput}
+            oncompositionstart={onCompositionStart}
+            oncompositionend={onCompositionEnd}
+            onkeydown={handleKeydown}
+            placeholder="输入消息... (Enter 发送, Shift+Enter 换行)"
+            rows="1"
+          ></textarea>
+          <button class="btn btn-send" onclick={sendMessage} disabled={!inputText.trim()}>
+            发送
+          </button>
+        {/if}
       </div>
     {/if}
   </main>
@@ -434,9 +465,21 @@
     border-color: #e94560;
   }
 
-  .input-area textarea:disabled {
-    opacity: 0.4;
-    cursor: not-allowed;
+  .apikey-hint {
+    flex: 1;
+    padding: 12px 16px;
+    border-radius: 8px;
+    background: #2a1a1a;
+    border: 1px solid #e9456040;
+    color: #e94560;
+    font-size: 14px;
+    text-align: center;
+  }
+
+  .apikey-hint a {
+    color: #e94560;
+    font-weight: 600;
+    text-decoration: underline;
   }
 
   /* ── Buttons ───────────────────────────────────────────── */

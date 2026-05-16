@@ -28,6 +28,11 @@ CREATE TABLE IF NOT EXISTS turns (
     FOREIGN KEY (session_id) REFERENCES sessions(session_id),
     UNIQUE(session_id, turn_num)
 );
+
+CREATE TABLE IF NOT EXISTS config (
+    key   TEXT PRIMARY KEY,
+    value TEXT NOT NULL
+);
 ";
 
 // ── Domain records ──────────────────────────────────────────────────
@@ -238,6 +243,28 @@ impl MemoryDb {
             )
             .unwrap();
         TurnId(max as u64 + 1)
+    }
+
+    // ── Config ──────────────────────────────────────────────────
+
+    pub fn set_config(&self, key: &str, value: &str) {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "INSERT INTO config (key, value) VALUES (?1, ?2)
+             ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+            params![key, value],
+        )
+        .unwrap();
+    }
+
+    pub fn get_config(&self, key: &str) -> Option<String> {
+        let conn = self.conn.lock().unwrap();
+        conn.query_row(
+            "SELECT value FROM config WHERE key = ?1",
+            params![key],
+            |row| row.get(0),
+        )
+        .ok()
     }
 
     // ── Stats ───────────────────────────────────────────────────
