@@ -54,8 +54,18 @@
     messages = [];
     let mid = 0;
     for (const t of turns) {
-      messages.push({ id: ++mid, role: "user", content: t.user_text, streaming: false });
-      messages.push({ id: ++mid, role: "assistant", content: t.assistant_text, streaming: false });
+      messages.push({
+        id: ++mid,
+        role: "user",
+        content: t.user_text,
+        streaming: false,
+      });
+      messages.push({
+        id: ++mid,
+        role: "assistant",
+        content: t.assistant_text,
+        streaming: false,
+      });
     }
     messageId = mid;
   }
@@ -85,7 +95,12 @@
     messages.push({ id: mid, role: "user", content: text, streaming: false });
 
     const assistantMid = ++messageId;
-    messages.push({ id: assistantMid, role: "assistant", content: "", streaming: true });
+    messages.push({
+      id: assistantMid,
+      role: "assistant",
+      content: "",
+      streaming: true,
+    });
 
     inputText = "";
 
@@ -106,17 +121,20 @@
       },
     );
 
-    unlistenDone = await listen<{ session_id: string }>("chat-done", (event) => {
-      if (event.payload.session_id === activeSessionId) {
-        const msg = messages.find((m) => m.id === assistantMid);
-        if (msg) {
-          msg.streaming = false;
-          messages = [...messages];
+    unlistenDone = await listen<{ session_id: string }>(
+      "chat-done",
+      (event) => {
+        if (event.payload.session_id === activeSessionId) {
+          const msg = messages.find((m) => m.id === assistantMid);
+          if (msg) {
+            msg.streaming = false;
+            messages = [...messages];
+          }
+          if (unlistenChunk) unlistenChunk();
+          if (unlistenDone) unlistenDone();
         }
-        if (unlistenChunk) unlistenChunk();
-        if (unlistenDone) unlistenDone();
-      }
-    });
+      },
+    );
 
     try {
       await invoke("send_message", {
@@ -175,8 +193,14 @@
     <div class="sidebar-header">
       <h1>chatPM</h1>
       <div class="sidebar-actions">
-        <button class="btn btn-icon" onclick={createSession} title="新建会话">+</button>
-        <button class="btn btn-icon" onclick={() => (showSettings = true)} title="设置">&#9881;</button>
+        <button class="btn btn-icon" onclick={createSession} title="新建会话"
+          >+</button
+        >
+        <button
+          class="btn btn-icon"
+          onclick={() => (showSettings = true)}
+          title="设置">&#9881;</button
+        >
       </div>
     </div>
 
@@ -191,7 +215,9 @@
             onclick={() => selectSession(s.session_id)}
           >
             <span class="session-id">{s.session_id.slice(0, 8)}...</span>
-            <span class="session-time">{new Date(s.created_at).toLocaleDateString()}</span>
+            <span class="session-time"
+              >{new Date(s.created_at).toLocaleDateString()}</span
+            >
           </button>
         {/each}
       {/if}
@@ -207,7 +233,11 @@
     {:else}
       <div class="messages">
         {#each messages as msg (msg.id)}
-          <div class="message" class:user={msg.role === "user"} class:assistant={msg.role === "assistant"}>
+          <div
+            class="message"
+            class:user={msg.role === "user"}
+            class:assistant={msg.role === "assistant"}
+          >
             <div class="bubble">
               {msg.content}
               {#if msg.streaming}
@@ -221,7 +251,13 @@
       <div class="input-area">
         {#if !apiKeyConfigured}
           <div class="apikey-hint">
-            请先<a href="#" onclick={(e) => { e.preventDefault(); showSettings = true; }}>配置 API Key</a>后再发送消息
+            请先<a
+              href="#"
+              onclick={(e) => {
+                e.preventDefault();
+                showSettings = true;
+              }}>配置 API Key</a
+            >后再发送消息
           </div>
         {:else}
           <textarea
@@ -233,7 +269,11 @@
             placeholder="输入消息... (Enter 发送, Shift+Enter 换行)"
             rows="1"
           ></textarea>
-          <button class="btn btn-send" onclick={sendMessage} disabled={!inputText.trim()}>
+          <button
+            class="btn btn-send"
+            onclick={sendMessage}
+            disabled={!inputText.trim()}
+          >
             发送
           </button>
         {/if}
@@ -259,7 +299,11 @@
         />
       </label>
       <div class="settings-actions">
-        <button class="btn btn-primary" onclick={configureApiKey} disabled={loading}>
+        <button
+          class="btn btn-primary"
+          onclick={configureApiKey}
+          disabled={loading}
+        >
           {loading ? "配置中..." : "保存"}
         </button>
         <button class="btn" onclick={() => (showSettings = false)}>取消</button>
@@ -279,7 +323,8 @@
   }
 
   :global(body) {
-    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto,
+      sans-serif;
     background: #1a1a2e;
     color: #e0e0e0;
     overflow: hidden;
