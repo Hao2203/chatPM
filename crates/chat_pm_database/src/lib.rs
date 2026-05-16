@@ -1,19 +1,36 @@
-/// # 内存数据库
-///
-/// 用 `HashMap` + `Vec` 模拟两张表：
-///   - `sessions`  : session_id → 会话元数据
-///   - `turns`     : session_id → Vec<TurnRecord>（按轮次追加）
-///
-/// 向量相似度检索用纯 Rust 余弦距离实现，无外部依赖。
 use std::{
-    collections::HashMap,
-    sync::{Arc, RwLock},
+    path::Path,
+    sync::{Arc, Mutex},
 };
 
 use chrono::{DateTime, Utc};
+use rusqlite::{Connection, params};
 use serde::{Deserialize, Serialize};
 
 use chat_pm_session::{chat::TurnId, memory::Memory};
+
+// ── Schema ──────────────────────────────────────────────────────────
+
+const SCHEMA_SQL: &str = "
+CREATE TABLE IF NOT EXISTS sessions (
+    session_id  TEXT PRIMARY KEY,
+    created_at  TEXT NOT NULL,
+    user_persona TEXT
+);
+
+CREATE TABLE IF NOT EXISTS turns (
+    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+    session_id   TEXT NOT NULL,
+    turn_num     INTEGER NOT NULL,
+    user_text    TEXT NOT NULL,
+    assistant_text TEXT NOT NULL,
+    created_at   TEXT NOT NULL,
+    FOREIGN KEY (session_id) REFERENCES sessions(session_id),
+    UNIQUE(session_id, turn_num)
+);
+";
+
+// ── Domain records ──────────────────────────────────────────────────
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SessionRecord {
@@ -31,21 +48,40 @@ pub struct TurnRecord {
     pub created_at: DateTime<Utc>,
 }
 
-#[derive(Debug, Default)]
-struct Inner {
-    sessions: HashMap<String, SessionRecord>,
-    turns: HashMap<String, Vec<TurnRecord>>,
+#[derive(Debug)]
+pub struct DbStats {
+    pub session_count: usize,
+    pub total_turn_count: usize,
 }
 
-#[derive(Debug, Clone, Default)]
+// ── Database handle ─────────────────────────────────────────────────
+
+#[derive(Debug, Clone)]
 pub struct MemoryDb {
-    inner: Arc<RwLock<Inner>>,
+    conn: Arc<Mutex<Connection>>,
 }
 
 impl MemoryDb {
-    pub fn new() -> Self {
-        Self::default()
+    /// 打开（或创建）一个持久化的 SQLite 数据库文件。
+    pub fn open(path: impl AsRef<Path>) -> Result<Self, rusqlite::Error> {
+        let conn = Connection::open(path)?;
+        conn.execute_batch("PRAGMA journal_mode=WAL; PRAGMA foreign_keys=ON;")?;
+        conn.execute_batch(SCHEMA_SQL)?;
+        Ok(Self {
+            conn: Arc::new(Mutex::new(conn)),
+        })
     }
+
+    /// 打开一个内存数据库（主要用于测试）。
+    pub fn open_in_memory() -> Result<Self, rusqlite::Error> {
+        let conn = Connection::open_in_memory()?;
+        conn.execute_batch(SCHEMA_SQL)?;
+        Ok(Self {
+            conn: Arc::new(Mutex::new(conn)),
+        })
+    }
+
+    // ── Session ─────────────────────────────────────────────────
 
     pub fn create_session(&self, session_id: &str) {
         self.upsert_session(SessionRecord {
@@ -59,14 +95,72 @@ impl MemoryDb {
         self.get_session(session_id).is_some()
     }
 
-    pub fn load_recent_memory(&self, session_id: &str, n: usize) -> Vec<Memory> {
-        self.recent_turns(session_id, n)
-            .into_iter()
-            .map(|x| x.to_memory_chunk())
-            .collect()
+    pub fn upsert_session(&self, record: SessionRecord) {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "INSERT INTO sessions (session_id, created_at, user_persona)
+             VALUES (?1, ?2, ?3)
+             ON CONFLICT(session_id) DO UPDATE SET
+                 created_at   = excluded.created_at,
+                 user_persona = excluded.user_persona",
+            params![
+                record.session_id,
+                record.created_at.to_rfc3339(),
+                record.user_persona,
+            ],
+        )
+        .unwrap();
     }
 
-    pub fn append_chat_turn(&self, session_id: &str, user_text: String, assistant_text: String) {
+    pub fn get_session(&self, session_id: &str) -> Option<SessionRecord> {
+        let conn = self.conn.lock().unwrap();
+        conn.query_row(
+            "SELECT session_id, created_at, user_persona FROM sessions WHERE session_id = ?1",
+            params![session_id],
+            |row| {
+                let created_at: String = row.get(1)?;
+                Ok(SessionRecord {
+                    session_id: row.get(0)?,
+                    created_at: DateTime::parse_from_rfc3339(&created_at)
+                        .unwrap()
+                        .with_timezone(&Utc),
+                    user_persona: row.get(2)?,
+                })
+            },
+        )
+        .ok()
+    }
+
+    pub fn list_sessions(&self) -> Vec<SessionRecord> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn
+            .prepare(
+                "SELECT session_id, created_at, user_persona FROM sessions ORDER BY created_at DESC",
+            )
+            .unwrap();
+        stmt.query_map([], |row| {
+            let created_at: String = row.get(1)?;
+            Ok(SessionRecord {
+                session_id: row.get(0)?,
+                created_at: DateTime::parse_from_rfc3339(&created_at)
+                    .unwrap()
+                    .with_timezone(&Utc),
+                user_persona: row.get(2)?,
+            })
+        })
+        .unwrap()
+        .filter_map(|r| r.ok())
+        .collect()
+    }
+
+    // ── Turns ───────────────────────────────────────────────────
+
+    pub fn append_chat_turn(
+        &self,
+        session_id: &str,
+        user_text: String,
+        assistant_text: String,
+    ) {
         let turn_id = self.next_turn_id(session_id);
         self.append_turn(TurnRecord {
             turn_id,
@@ -77,55 +171,93 @@ impl MemoryDb {
         });
     }
 
-    pub fn upsert_session(&self, record: SessionRecord) {
-        let mut db = self.inner.write().unwrap();
-        db.sessions.insert(record.session_id.clone(), record);
-    }
-
-    pub fn get_session(&self, session_id: &str) -> Option<SessionRecord> {
-        self.inner.read().unwrap().sessions.get(session_id).cloned()
-    }
-
     pub fn append_turn(&self, record: TurnRecord) {
-        let mut db = self.inner.write().unwrap();
-        db.turns
-            .entry(record.session_id.clone())
-            .or_default()
-            .push(record);
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "INSERT INTO turns (session_id, turn_num, user_text, assistant_text, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5)",
+            params![
+                record.session_id,
+                record.turn_id.0,
+                record.user_text,
+                record.assistant_text,
+                record.created_at.to_rfc3339(),
+            ],
+        )
+        .unwrap();
     }
 
     pub fn recent_turns(&self, session_id: &str, n: usize) -> Vec<TurnRecord> {
-        let db = self.inner.read().unwrap();
-        let turns = db
-            .turns
-            .get(session_id)
-            .map(|v| v.as_slice())
-            .unwrap_or(&[]);
-        let start = turns.len().saturating_sub(n);
-        turns[start..].to_vec()
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn
+            .prepare(
+                "SELECT turn_num, session_id, user_text, assistant_text, created_at
+                 FROM turns
+                 WHERE session_id = ?1
+                 ORDER BY turn_num DESC
+                 LIMIT ?2",
+            )
+            .unwrap();
+
+        let mut rows: Vec<TurnRecord> = stmt
+            .query_map(params![session_id, n as i64], |row| {
+                let created_at: String = row.get(4)?;
+                Ok(TurnRecord {
+                    turn_id: TurnId(row.get::<_, i64>(0)? as u64),
+                    session_id: row.get(1)?,
+                    user_text: row.get(2)?,
+                    assistant_text: row.get(3)?,
+                    created_at: DateTime::parse_from_rfc3339(&created_at)
+                        .unwrap()
+                        .with_timezone(&Utc),
+                })
+            })
+            .unwrap()
+            .filter_map(|r| r.ok())
+            .collect();
+
+        // Reverse to chronological order (oldest first)
+        rows.reverse();
+        rows
+    }
+
+    pub fn load_recent_memory(&self, session_id: &str, n: usize) -> Vec<Memory> {
+        self.recent_turns(session_id, n)
+            .into_iter()
+            .map(|t| t.to_memory_chunk())
+            .collect()
     }
 
     pub fn next_turn_id(&self, session_id: &str) -> TurnId {
-        let db = self.inner.read().unwrap();
-        let len = db.turns.get(session_id).map(|v| v.len()).unwrap_or(0);
-        TurnId(len as u64 + 1)
+        let conn = self.conn.lock().unwrap();
+        let max: i64 = conn
+            .query_row(
+                "SELECT COALESCE(MAX(turn_num), 0) FROM turns WHERE session_id = ?1",
+                params![session_id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        TurnId(max as u64 + 1)
     }
 
+    // ── Stats ───────────────────────────────────────────────────
+
     pub fn stats(&self) -> DbStats {
-        let db = self.inner.read().unwrap();
-        let total_turns: usize = db.turns.values().map(|v| v.len()).sum();
+        let conn = self.conn.lock().unwrap();
+        let session_count: usize = conn
+            .query_row("SELECT COUNT(*) FROM sessions", [], |row| row.get(0))
+            .unwrap();
+        let total_turn_count: usize = conn
+            .query_row("SELECT COUNT(*) FROM turns", [], |row| row.get(0))
+            .unwrap();
         DbStats {
-            session_count: db.sessions.len(),
-            total_turn_count: total_turns,
+            session_count,
+            total_turn_count,
         }
     }
 }
 
-#[derive(Debug)]
-pub struct DbStats {
-    pub session_count: usize,
-    pub total_turn_count: usize,
-}
+// ── TurnRecord → Memory ─────────────────────────────────────────────
 
 impl TurnRecord {
     pub fn to_memory_chunk(&self) -> Memory {
@@ -135,6 +267,8 @@ impl TurnRecord {
         }
     }
 }
+
+// ── Cosine similarity (向量检索，为未来 RAG 准备) ────────────────────
 
 pub fn cosine_similarity(a: &[f32], b: &[f32]) -> f32 {
     let len = a.len().min(b.len());

@@ -18,7 +18,7 @@ async fn demo() -> Result<()> {
         .apply();
     dotenvy::dotenv()?;
 
-    let db = MemoryDb::new();
+    let db = MemoryDb::open_in_memory()?;
     let config = PipelineConfig::default();
     let pipeline = ChatPipeline::with_default_deepseek(db, config)?;
 
