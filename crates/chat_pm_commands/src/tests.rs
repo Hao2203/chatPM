@@ -1,7 +1,7 @@
 use std::{io::Write, time::Duration};
 
 use anyhow::Result;
-use chat_pm_conversation::message::UserInput;
+use chat_pm_session::message::UserInput;
 use logforth::{
     layout::TextLayout,
     record::{Level, LevelFilter},

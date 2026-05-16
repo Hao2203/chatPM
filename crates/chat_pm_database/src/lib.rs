@@ -13,7 +13,7 @@ use std::{
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
-use chat_pm_conversation::{chat::TurnId, memory::Memory};
+use chat_pm_session::{chat::TurnId, memory::Memory};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SessionRecord {

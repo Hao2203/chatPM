@@ -1,5 +1,5 @@
 use anyhow::{Context as _, Result, anyhow};
-use chat_pm_conversation::{chat::StopReason, message::ChatMessage};
+use chat_pm_session::{chat::StopReason, message::ChatMessage};
 use futures_lite::StreamExt;
 use reqwest::header::{AUTHORIZATION, CONTENT_TYPE};
 use serde::Deserialize;
@@ -188,12 +188,12 @@ trait RoleAsStr {
     fn as_str(&self) -> &'static str;
 }
 
-impl RoleAsStr for chat_pm_conversation::chat::Role {
+impl RoleAsStr for chat_pm_session::chat::Role {
     fn as_str(&self) -> &'static str {
         match self {
-            chat_pm_conversation::chat::Role::System => "system",
-            chat_pm_conversation::chat::Role::User => "user",
-            chat_pm_conversation::chat::Role::Assistant => "assistant",
+            chat_pm_session::chat::Role::System => "system",
+            chat_pm_session::chat::Role::User => "user",
+            chat_pm_session::chat::Role::Assistant => "assistant",
         }
     }
 }

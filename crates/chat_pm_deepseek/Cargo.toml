@@ -5,7 +5,7 @@ edition = "2024"
 
 [dependencies]
 anyhow = { workspace = true }
-chat_pm_conversation = { workspace = true }
+chat_pm_session = { workspace = true }
 futures-lite = { workspace = true }
 reqwest = { workspace = true }
 secrecy = { workspace = true }

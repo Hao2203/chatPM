@@ -5,7 +5,7 @@ use tokio::sync::mpsc;
 use tracing::{debug, info};
 use uuid::Uuid;
 
-use chat_pm_conversation::{
+use chat_pm_session::{
     chat::{MessageFrame, ReplyReceiver, StopReason},
     context::Context,
     message::{UserInput},

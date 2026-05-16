@@ -488,9 +488,9 @@ name = "chat_pm_commands"
 version = "0.1.0"
 dependencies = [
  "anyhow",
- "chat_pm_conversation",
  "chat_pm_database",
  "chat_pm_deepseek",
+ "chat_pm_session",
  "chrono",
  "dotenvy",
  "futures-lite",
@@ -505,17 +505,10 @@ dependencies = [
 ]
 
 [[package]]
-name = "chat_pm_conversation"
-version = "0.1.0"
-dependencies = [
- "derive_more",
-]
-
-[[package]]
 name = "chat_pm_database"
 version = "0.1.0"
 dependencies = [
- "chat_pm_conversation",
+ "chat_pm_session",
  "chrono",
  "serde",
 ]
@@ -525,13 +518,20 @@ name = "chat_pm_deepseek"
 version = "0.1.0"
 dependencies = [
  "anyhow",
- "chat_pm_conversation",
+ "chat_pm_session",
  "futures-lite",
  "reqwest",
  "secrecy",
  "serde",
  "serde_json",
  "tokio",
+]
+
+[[package]]
+name = "chat_pm_session"
+version = "0.1.0"
+dependencies = [
+ "derive_more",
 ]
 
 [[package]]
