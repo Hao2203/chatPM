@@ -6,6 +6,9 @@ on:
       - 'v*'
   workflow_dispatch:
 
+permissions:
+  contents: write    # 添加这一行，允许创建 Release
+
 jobs:
   build:
     strategy:
