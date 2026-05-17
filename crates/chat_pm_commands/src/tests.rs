@@ -22,42 +22,55 @@ async fn demo() -> Result<()> {
     let config = PipelineConfig::default();
     let pipeline = ChatPipeline::with_default_deepseek(db, config)?;
 
-    // ── 1. 创建会话，获取凭证 ───────────────────────────────────────
-    let handle = pipeline.create_session();
+    // ── 1. 创建会话 → NewSession ──────────────────────────────────
+    let new_session = pipeline.create_session();
+    println!(
+        "会话已创建，session_id = {}",
+        new_session.session_id
+    );
 
-    println!("会话已创建，session_id = {}", handle.id());
-
-    // ── 2. 模拟多轮对话 ─────────────────────────────────────────────
+    // ── 2. 首轮：NewSession → TitlePrompt → Session → chat ──────
     let turns = [
         "你好",
         "帮我规划日本旅行，我喜欢二次元和乡村，先推荐第一天。",
         "帮我规划日本旅行，我喜欢二次元和乡村，再推荐第二天。",
     ];
 
-    for (i, user_input) in turns.iter().enumerate() {
+    let mut session: Option<chat_pm_session::session::Session> = None;
+
+    for (i, user_text) in turns.iter().enumerate() {
         println!("{}", "─".repeat(60));
-        println!("轮次 {} 用户：{}", i + 1, user_input);
+        println!("轮次 {} 用户：{}", i + 1, user_text);
         println!("{}", "─".repeat(60));
 
-        let mut stream = pipeline.chat(&handle, UserInput::new(user_input)).await?;
+        let user_input = UserInput::new(user_text);
+
+        let s = if i == 0 {
+            // 首轮：NewSession → TitlePrompt → finalize → Session
+            let tp = new_session.clone().into_title_prompt(user_text.to_string());
+            let s = pipeline.finalize_session(tp).await?;
+            println!("标题已生成：{}", s.title);
+            s
+        } else {
+            session.clone().unwrap()
+        };
+
+        let mut stream = pipeline.chat(&s, user_input).await?;
         print!("助手：");
         while let Some(Ok(frame)) = stream.recv().await {
             print(&frame.content);
-            // if let Some(warn) = &answer.truncation_warning {
-            //     println!("⚠️  {warn}");
-            // }
         }
-
         println!();
+        session = Some(s);
     }
 
-    // ── 3. 模拟跨请求恢复（HTTP 无状态场景） ────────────────────────
+    // ── 3. 模拟跨请求恢复 ──────────────────────────────────────
     println!("{}", "═".repeat(60));
     println!("(模拟：新 HTTP 请求携带旧 session_id 恢复会话)");
     println!("用户：刚才我们聊到哪里了？");
     println!("{}", "═".repeat(60));
 
-    let saved_id = handle.id(); // 前端 cookie 中保存的值
+    let saved_id = session.as_ref().unwrap().session_id;
 
     match pipeline.resume_session(saved_id) {
         Ok(resumed) => {
@@ -67,9 +80,6 @@ async fn demo() -> Result<()> {
             print!("助手：");
             while let Some(Ok(frame)) = stream.recv().await {
                 print!("{}", frame.content);
-                // if let Some(warn) = &answer.truncation_warning {
-                //     println!("⚠️  {warn}");
-                // }
             }
         }
         Err(e) => eprintln!("恢复失败：{e}"),

@@ -21,7 +21,7 @@ chatPM is a local-first chat application with future end-to-end encrypted sync s
 ### Dependency Hierarchy
 
 ```
-chat_pm_session          ← zero internal deps (only derive_more)
+chat_pm_session          ← zero internal deps (only derive_more, uuid)
     ↑
 chat_pm_database         ← + rusqlite (bundled), chrono, serde
 chat_pm_deepseek         ← + reqwest, secrecy, tokio
@@ -47,7 +47,8 @@ src-tauri (chatpm)       ← depends on all crates, + tauri, tokio, uuid
 | `context.rs` | `Context { summary: Option<Summary>, recent_memory: Vec<Memory> }` | Assembled before prompt composition |
 | `summary.rs` | `Summary { content, last_turn_id }` | Conversation summary for long contexts |
 | `language.rs` | `Language` enum (~30 variants), `SUPPORTED_LANGUAGES` | Each variant has a `code()` → BCP-47 string |
-| `prompt.rs` | `SystemPrompt`, `PromptComposer` | Composes `Vec<ChatMessage>` from context + user input |
+| `prompt.rs` | `SystemPrompt`, `PromptComposer`, `TitlePrompt` | `TitlePrompt` carries `SessionId` + user input; `compose()` → `Vec<ChatMessage>` |
+| `session.rs` | `SessionId(Uuid)`, `Title(String)`, `NewSession`, `Session` | Newtype wrappers + lifecycle states |
 
 ### Prompt Composition Flow (`PromptComposer::compose_prompt`)
 
@@ -55,6 +56,40 @@ src-tauri (chatpm)       ← depends on all crates, + tauri, tokio, uuid
 2. If summary exists → prepend `"Summary: {content}"` as system message
 3. Interleave memory pairs: assistant msg → user msg (oldest first)
 4. Append current `UserInput` as final user message
+
+### Title Generation Flow (Type-Driven State Machine)
+
+```
+NewSession { session_id: SessionId }
+    │
+    └── .into_title_prompt(user_input)         // 消耗 NewSession
+        │
+        └── TitlePrompt { session_id, user_input }
+            │
+            └── .compose() → Vec<ChatMessage>   // 纯函数：组装提示词
+            │
+            └── pipeline.finalize_session(tp)   // 调用 LLM，持久化标题
+                │
+                └── Session { session_id, title: Title }
+                    │
+                    └── pipeline.chat(&session, user_input)
+```
+
+**类型安全保障：**
+- `NewSession` 不能直接对话 — 没有 `chat` 方法
+- `into_title_prompt(self)` 消耗 `NewSession`，防止重复生成标题
+- `finalize_session(TitlePrompt)` 消耗 `TitlePrompt`，标题生成仅一次
+- 恢复已有标题的会话：`pipeline.resume_session(SessionId) → Result<Session>`
+
+### Domain Newtype Pattern
+
+核心层对所有外部标识符使用 newtype 封装，杜绝裸 `String` / `Uuid`：
+
+| Newtype | 内部类型 | 关键 trait |
+|---|---|---|
+| `SessionId` | `Uuid` | `Copy`, `Display`, `Hash` |
+| `Title` | `String` | `Display`, `as_str()`, `into_inner()` |
+| `UserInput` | `String` | `Display`, `Into<String>` |
 
 ---
 
@@ -70,6 +105,7 @@ Uses `rusqlite` with `bundled` feature (SQLite compiled into binary). Thread-saf
 CREATE TABLE sessions (
     session_id  TEXT PRIMARY KEY,
     created_at  TEXT NOT NULL,   -- RFC 3339
+    title       TEXT,            -- AI-generated or user-set
     user_persona TEXT
 );
 
@@ -83,6 +119,11 @@ CREATE TABLE turns (
     FOREIGN KEY (session_id) REFERENCES sessions(session_id),
     UNIQUE(session_id, turn_num)
 );
+
+CREATE TABLE config (
+    key   TEXT PRIMARY KEY,
+    value TEXT NOT NULL
+);
 ```
 
 Configured with `PRAGMA journal_mode=WAL; PRAGMA foreign_keys=ON;`.
@@ -95,6 +136,9 @@ Configured with `PRAGMA journal_mode=WAL; PRAGMA foreign_keys=ON;`.
 | `MemoryDb::open_in_memory()` | Open in-memory DB (tests) |
 | `create_session(session_id)` | Insert new session |
 | `session_exists(session_id) -> bool` | Check existence |
+| `get_session(session_id) -> Option<SessionRecord>` | Fetch full record (includes title) |
+| `set_session_title(session_id, title)` | Update session title |
+| `get_session_title(session_id) -> Option<String>` | Read title |
 | `list_sessions() -> Vec<SessionRecord>` | All sessions, newest first |
 | `append_chat_turn(session_id, user_text, assistant_text)` | Insert one turn pair |
 | `recent_turns(session_id, n) -> Vec<TurnRecord>` | Last N turns (chronological) |
@@ -104,7 +148,7 @@ Configured with `PRAGMA journal_mode=WAL; PRAGMA foreign_keys=ON;`.
 
 ### Key Types
 
-- `SessionRecord { session_id, created_at, user_persona }` — Serialize/Deserialize
+- `SessionRecord { session_id, created_at, title, user_persona }` — Serialize/Deserialize
 - `TurnRecord { turn_id, session_id, user_text, assistant_text, created_at }` — `to_memory_chunk() -> Memory`
 
 ### Utility
@@ -135,13 +179,24 @@ Stop reasons: `"length"` → `MaxTokens`, `"content_filter"` → `ContentFilter`
 
 ### `ChatPipeline`
 
-Orchestrates the full flow:
-1. Load recent memory from DB
-2. Build `SystemPrompt` from config
-3. Compose prompt via `PromptComposer`
-4. Stream from DeepSeek client
-5. Collect response via `ReplyReceiver` → `FinalAnswer`
-6. Write turn back to DB via `append_chat_turn`
+Orchestrates the full flow with type-driven session lifecycle:
+
+| Method | Signature | Notes |
+|---|---|---|
+| `create_session` | `() → NewSession` | DB record created, no title yet |
+| `finalize_session` | `(TitlePrompt) → Result<Session>` | Calls LLM, persists title, **consumes** `TitlePrompt` |
+| `resume_session` | `(SessionId) → Result<Session>` | Only succeeds if title exists in DB |
+| `chat` | `(&Session, UserInput) → Result<Receiver<Result<MessageFrame>>>` | Type system ensures only titled sessions can chat |
+
+**State machine flow (first turn):**
+```
+create_session() → NewSession
+    → new_session.into_title_prompt(user_input) → TitlePrompt
+    → pipeline.finalize_session(tp) → Session
+    → pipeline.chat(&session, user_input)
+```
+
+**Subsequent turns:** `resume_session(id) → Session` → `chat(&session, input)`
 
 ### `PipelineConfig` (Default)
 
@@ -157,14 +212,6 @@ Orchestrates the full flow:
 | `reasoning_effort` | None |
 
 Env override: `CHAT_PM_REASONING_EFFORT`
-
-### Session Management
-
-- `SessionHandle(Uuid)` / `SessionId(Uuid)` — UUIDv7
-- `SessionId::from_uuid(uuid)` — constructor for external use
-- `create_session()` → new UUIDv7, inserted into DB
-- `resume_session(SessionId)` → validates existence, returns handle
-- `Display` on both types outputs the UUID string
 
 ---
 
@@ -190,17 +237,19 @@ API key is stored in the `config` table of the SQLite database (`key="api_key"`)
 | Command | Input | Output | Notes |
 |---|---|---|---|
 | `check_api_key` | — | `bool` | Whether pipeline is ready |
-| `create_session` | — | `String` (session_id) | UUIDv7 |
+| `create_session` | — | `String` (session_id) | Creates `NewSession` in DB, returns UUID |
 | `set_api_key` | `api_key: String` | `()` | Validates, stores to DB, inits pipeline |
-| `send_message` | `session_id, content` | `()` | Emits events for streaming |
+| `send_message` | `session_id, content` | `()` | State machine: `NewSession`→`TitlePrompt`→`Session` on first turn |
 | `list_sessions` | — | `Vec<SessionInfo>` | All sessions, newest first |
 | `get_turns` | `session_id` | `Vec<TurnInfo>` | All turns for session |
+| `update_session_title` | `session_id, title` | `()` | Manual title edit, emits event |
 
 ### Event-Based Streaming
 
 `send_message` spawns a tokio task that emits:
 - `chat-chunk` → `{ session_id, content }` — each text chunk
 - `chat-done` → `{ session_id }` — stream finished, turn stored in DB
+- `session-title-updated` → `{ session_id, title }` — emitted on first-turn title generation and manual title edits
 
 This avoids blocking the Tauri IPC channel during streaming.
 
@@ -281,12 +330,13 @@ Run: `cargo test --package chat_pm_commands`
 ## Current State
 
 **Implemented:**
-- Core domain model (`chat_pm_session`) — sync-only, no I/O
+- Core domain model (`chat_pm_session`) — sync-only, no I/O, newtype pattern
+- AI-powered title generation via `TitlePrompt` + type-driven state machine
 - SQLite storage via `rusqlite` (`chat_pm_database`) — WAL mode, bundled
 - DeepSeek streaming client (`chat_pm_deepseek`)
-- Chat pipeline with session management (`chat_pm_commands`)
+- Chat pipeline with session lifecycle (`chat_pm_commands`)
 - Tauri commands with event-based streaming (`src-tauri`)
-- Chat UI with session list, streaming display, API key config (SvelteKit)
+- Chat UI with session list, title display, streaming, API key config (SvelteKit)
 
 **Not Yet Implemented:**
 - Summary/compression for long conversations (placeholder types exist)

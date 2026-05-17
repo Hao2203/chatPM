@@ -3,13 +3,13 @@ use chat_pm_database::MemoryDb;
 use chat_pm_deepseek::{ChatRequestConfig, Client as DeepseekClient, ReasoningEffort};
 use tokio::sync::mpsc;
 use tracing::{debug, info};
-use uuid::Uuid;
 
 use chat_pm_session::{
     chat::{MessageFrame, ReplyReceiver, StopReason},
     context::Context,
-    message::{ChatMessage, UserInput},
-    prompt::{PromptComposer, SystemPrompt},
+    message::UserInput,
+    prompt::{PromptComposer, SystemPrompt, TitlePrompt},
+    session::{NewSession, Session, SessionId, Title},
 };
 
 #[derive(Debug, Clone)]
@@ -61,35 +61,26 @@ impl Default for PipelineConfig {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-pub struct SessionId(Uuid);
+// ── Title config (constant for the lightweight title generation request) ─
 
-impl SessionId {
-    pub fn from_uuid(uuid: Uuid) -> Self {
-        Self(uuid)
+fn title_request_config(model: &str) -> ChatRequestConfig {
+    ChatRequestConfig {
+        model: model.to_string(),
+        max_tokens: 32,
+        thinking_enabled: false,
+        reasoning_effort: None,
     }
 }
 
-impl std::fmt::Display for SessionId {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}", self.0)
-    }
+fn clean_title(raw: &str) -> Title {
+    Title::new(
+        raw.trim()
+            .trim_matches(['"', '\'', '《', '》', '「', '」'])
+            .to_string(),
+    )
 }
 
-#[derive(Debug)]
-pub struct SessionHandle(Uuid);
-
-impl SessionHandle {
-    pub fn id(&self) -> SessionId {
-        SessionId(self.0)
-    }
-}
-
-impl std::fmt::Display for SessionHandle {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}", self.0)
-    }
-}
+// ── ChatPipeline ────────────────────────────────────────────────────
 
 #[derive(Clone)]
 pub struct ChatPipeline {
@@ -109,73 +100,68 @@ impl ChatPipeline {
         Self::new(db, client, config)
     }
 
-    pub fn create_session(&self) -> SessionHandle {
-        let session_id = Uuid::now_v7();
+    // ── Lifecycle: NewSession ───────────────────────────────────────
+
+    /// 创建新会话 → `NewSession`。
+    ///
+    /// 数据库记录已写入，但标题尚未生成。
+    pub fn create_session(&self) -> NewSession {
+        let session_id = SessionId::new();
         self.db.create_session(&session_id.to_string());
         info!(%session_id, "新会话已创建");
-        SessionHandle(session_id)
+        NewSession { session_id }
     }
 
-    pub fn resume_session(&self, session_id: SessionId) -> Result<SessionHandle> {
-        if self.db.session_exists(&session_id.to_string()) {
-            Ok(SessionHandle(session_id.0))
-        } else {
-            Err(anyhow!("session '{}' 不存在", session_id))
-        }
-    }
+    // ── Lifecycle: TitlePrompt → Session ────────────────────────────
 
-    pub fn set_session_title(&self, handle: &SessionHandle, title: &str) {
-        let session_id = handle.id().to_string();
-        self.db.set_session_title(&session_id, title);
-        info!(%session_id, %title, "会话标题已更新");
-    }
+    /// `TitlePrompt` → `Session`：调用 LLM 生成标题，持久化后转入正式会话。
+    ///
+    /// 消耗 `TitlePrompt`，确保标题生成只发生一次。
+    pub async fn finalize_session(&self, tp: TitlePrompt) -> Result<Session> {
+        let session_id = tp.session_id();
+        let messages = tp.compose();
 
-    /// 根据用户首条消息生成会话标题（仅在新会话的首轮调用）
-    async fn generate_title(&self, session_id: &str, user_input: &UserInput) -> Result<()> {
-        let prompt = format!(
-            "根据以下对话内容，生成一个简洁的标题（不超过10个字，不要加引号）：\n{}",
-            user_input
-        );
-        let messages = vec![
-            ChatMessage::system("你是一个标题生成助手，只输出标题文本，不输出任何其他内容。"),
-            ChatMessage::user(prompt),
-        ];
-        let title = self
+        let raw_title = self
             .client
-            .chat_complete(
-                &ChatRequestConfig {
-                    model: self.config.chat_model.clone(),
-                    max_tokens: 32,
-                    thinking_enabled: false,
-                    reasoning_effort: None,
-                },
-                &messages,
-            )
+            .chat_complete(&title_request_config(&self.config.chat_model), &messages)
             .await?;
-        let title = title.trim().trim_matches(&['"', '\'', '《', '》', '「', '」']).to_string();
-        self.db.set_session_title(session_id, &title);
-        info!(%session_id, %title, "标题已生成");
-        Ok(())
+
+        let title = clean_title(&raw_title);
+        let sid = session_id.to_string();
+        self.db.set_session_title(&sid, title.as_str());
+        info!(session_id = %sid, %title, "会话标题已生成");
+        Ok(Session { session_id, title })
     }
 
+    /// 从持久化记录恢复 `Session`（仅限已有标题的会话）。
+    pub fn resume_session(&self, session_id: SessionId) -> Result<Session> {
+        let sid = session_id.to_string();
+        let record = self
+            .db
+            .get_session(&sid)
+            .ok_or_else(|| anyhow!("session '{sid}' 不存在"))?;
+        let title = record
+            .title
+            .ok_or_else(|| anyhow!("session '{sid}' 尚未生成标题，无法恢复"))?;
+        Ok(Session::resume(session_id, Title::new(title)))
+    }
+
+    // ── Chat on Session ─────────────────────────────────────────────
+
+    /// 在 `Session` 上进行对话，返回流式消息接收器。
+    ///
+    /// 类型系统保证：只有已生成标题的 `Session` 才能对话。
     pub async fn chat(
         &self,
-        handle: &SessionHandle,
+        session: &Session,
         user_input: UserInput,
     ) -> Result<mpsc::Receiver<Result<MessageFrame>>> {
-        let session_id = handle.id().to_string();
-        info!(%session_id, "开始处理");
+        let sid = session.session_id.to_string();
+        info!(%sid, "开始处理");
 
-        // 首轮对话：先生成标题，再进行回复
         let recent_memory = self
             .db
-            .load_recent_memory(&session_id, self.config.short_term_turns);
-        let is_first_turn = recent_memory.is_empty();
-        if is_first_turn {
-            if let Err(e) = self.generate_title(&session_id, &user_input).await {
-                tracing::warn!(%session_id, error = %e, "标题生成失败，继续回复");
-            }
-        }
+            .load_recent_memory(&sid, self.config.short_term_turns);
         debug!(count = recent_memory.len(), "短期记忆加载完成");
 
         let system_prompt = SystemPrompt {
@@ -227,7 +213,7 @@ impl ChatPipeline {
             }
 
             let answer = receiver.finish(stop_reason_result, completion_tokens_result);
-            db.append_chat_turn(&session_id, user_input.into(), answer.display_text.clone());
+            db.append_chat_turn(&sid, user_input.into(), answer.display_text.clone());
 
             let stats = db.stats();
             info!(

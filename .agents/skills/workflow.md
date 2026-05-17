@@ -46,10 +46,52 @@
 
 ### 产出清单
 
-- [ ] 核心类型定义（如 `Message`、`Role`、`Context`、`Turn`）
-- [ ] 纯函数实现（如 `compose_prompt()`、`normalize()`、`assemble()`）
-- [ ] 不涉及 I/O 的验证逻辑（如格式校验、字符过滤）
+- [ ] 核心类型定义（`Message`、`Role`、`Context`、`Turn`、业务专属 newtype）
+- [ ] 纯函数实现（`compose_prompt()`、`normalize()`、`assemble()`、`compose()`）
+- [ ] 状态类型定义（生命周期状态如 `NewSession`、`TitlePrompt`、`Session`）
+- [ ] 不涉及 I/O 的验证逻辑（格式校验、字符过滤）
 - [ ] 单元测试覆盖所有公开函数
+
+### 核心层设计模式
+
+#### Newtype Pattern
+
+对所有外部标识符和值对象使用 newtype 封装，禁止裸 `String` / `Uuid` 出现在领域类型的公开字段中：
+
+```rust
+// ✅ 正确
+pub struct SessionId(Uuid);
+pub struct Title(String);
+
+pub struct Session {
+    pub session_id: SessionId,
+    pub title: Title,
+}
+
+// ❌ 错误：裸类型
+pub struct Session {
+    pub session_id: Uuid,
+    pub title: String,
+}
+```
+
+每个 newtype 需实现：`Display`（用于日志）、适当访问器（`as_str()`、`as_uuid()` 等）。
+
+#### Type-Driven State Machine
+
+用 Rust 类型系统建模业务流程的状态转换，使非法状态不可表达：
+
+```
+NewSession ──into_title_prompt(self)──→ TitlePrompt ──finalize_session()──→ Session
+                                                                              │
+                                                                        chat(&Session)
+```
+
+关键规则：
+1. **每个状态是一个类型** — 不含 `Option` 来判断"是否已完成某步骤"
+2. **状态转换消耗前一个状态** — `fn transition(self, ...) -> NextState` 防止重复转换
+3. **只有最终状态暴露业务操作** — `chat()` 只接受 `&Session`，不接受 `NewSession`
+4. **提示词构造是纯函数** — `TitlePrompt::compose() → Vec<ChatMessage>` 在核心层完成
 
 ### 示例结构
 

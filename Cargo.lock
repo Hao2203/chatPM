@@ -533,6 +533,7 @@ name = "chat_pm_session"
 version = "0.1.0"
 dependencies = [
  "derive_more",
+ "uuid",
 ]
 
 [[package]]

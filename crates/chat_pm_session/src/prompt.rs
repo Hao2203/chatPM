@@ -2,6 +2,7 @@ use crate::{
     context::Context,
     language::Language,
     message::{ChatMessage, UserInput},
+    session::SessionId,
 };
 
 /// 系统提示
@@ -60,5 +61,51 @@ impl PromptComposer {
         messages.push(ChatMessage::user(user_input.into_inner()));
 
         messages
+    }
+}
+
+// ── Title generation ──────────────────────────────────────────────────
+
+/// 标题生成状态：由 [`NewSession`] 转换而来，承载生成标题所需的全部信息。
+///
+/// 生命周期：`NewSession` → `TitlePrompt` → `Session`
+///
+/// [`NewSession`]: crate::session::NewSession
+/// [`Session`]: crate::session::Session
+#[derive(Debug, Clone)]
+pub struct TitlePrompt {
+    session_id: SessionId,
+    user_input: String,
+}
+
+impl TitlePrompt {
+    pub fn new(session_id: SessionId, user_input: String) -> Self {
+        Self {
+            session_id,
+            user_input,
+        }
+    }
+
+    pub fn session_id(&self) -> SessionId {
+        self.session_id
+    }
+
+    /// 将标题生成需求组装为完整的消息列表，供 LLM 调用方使用。
+    pub fn compose(&self) -> Vec<ChatMessage> {
+        vec![
+            ChatMessage::system(Self::system_prompt()),
+            ChatMessage::user(Self::user_prompt(&self.user_input)),
+        ]
+    }
+
+    fn system_prompt() -> String {
+        "你是一个标题生成助手，只输出标题文本，不输出任何其他内容。".to_string()
+    }
+
+    fn user_prompt(user_input: &str) -> String {
+        format!(
+            "根据以下对话内容，生成一个简洁的标题（不超过10个字，不要加引号）：\n{}",
+            user_input
+        )
     }
 }

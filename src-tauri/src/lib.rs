@@ -1,6 +1,9 @@
-use chat_pm_commands::session::{ChatPipeline, PipelineConfig, SessionId};
+use chat_pm_commands::session::{ChatPipeline, PipelineConfig};
 use chat_pm_database::MemoryDb;
-use chat_pm_session::message::UserInput;
+use chat_pm_session::{
+    message::UserInput,
+    session::{NewSession, SessionId},
+};
 use serde::Serialize;
 use tauri::{Emitter, Manager, State};
 use tokio::sync::Mutex;
@@ -66,10 +69,15 @@ async fn check_api_key(state: State<'_, AppState>) -> Result<bool, String> {
 
 #[tauri::command]
 fn create_session(state: State<'_, AppState>) -> Result<String, String> {
-    let session_id = uuid::Uuid::now_v7().to_string();
-    state.db.create_session(&session_id);
-    tracing::info!(%session_id, "会话已创建");
-    Ok(session_id)
+    let guard = state
+        .pipeline
+        .try_lock()
+        .map_err(|_| "locked".to_string())?;
+    let pipeline = guard
+        .as_ref()
+        .ok_or_else(|| "请先配置 API Key".to_string())?;
+    let new_session = pipeline.create_session();
+    Ok(new_session.session_id.to_string())
 }
 
 #[tauri::command]
@@ -105,30 +113,43 @@ async fn send_message(
             .ok_or_else(|| "请先配置 API Key".to_string())?
     };
 
-    let session_handle = pipeline
-        .resume_session(SessionId::from_uuid(
-            uuid::Uuid::parse_str(&session_id).map_err(|e| e.to_string())?,
-        ))
-        .map_err(|e| e.to_string())?;
-
+    let session_id = SessionId::from_uuid(
+        uuid::Uuid::parse_str(&session_id).map_err(|e| e.to_string())?,
+    );
     let user_input = UserInput::new(&content);
+
+    // ── 状态机：NewSession / Session 分流 ──────────────────────
+    let session = match pipeline.resume_session(session_id) {
+        // 已有标题的会话 → 直接对话
+        Ok(session) => session,
+        Err(_) => {
+            // 无标题 → 是 NewSession，走 TitlePrompt → Session 流程
+            let new_session = NewSession { session_id };
+            let tp = new_session.into_title_prompt(user_input.to_string());
+            let session = pipeline
+                .finalize_session(tp)
+                .await
+                .map_err(|e| e.to_string())?;
+
+            // Emit title event
+            let _ = app.emit(
+                "session-title-updated",
+                SessionTitlePayload {
+                    session_id: session.session_id.to_string(),
+                    title: session.title.to_string(),
+                },
+            );
+
+            session
+        }
+    };
+
     let mut stream = pipeline
-        .chat(&session_handle, user_input)
+        .chat(&session, user_input)
         .await
         .map_err(|e| e.to_string())?;
 
-    // Emit title if it was just generated (first turn)
-    if let Some(title) = state.db.get_session_title(&session_id) {
-        let _ = app.emit(
-            "session-title-updated",
-            SessionTitlePayload {
-                session_id: session_id.clone(),
-                title,
-            },
-        );
-    }
-
-    let sid = session_id.clone();
+    let sid_str = session.session_id.to_string();
     let app_handle = app.clone();
 
     // Spawn a task to forward streaming chunks as Tauri events
@@ -139,13 +160,13 @@ async fn send_message(
                     let _ = app_handle.emit(
                         "chat-chunk",
                         ChatChunkPayload {
-                            session_id: sid.clone(),
+                            session_id: sid_str.clone(),
                             content: frame.content,
                         },
                     );
                 }
                 Err(e) => {
-                    tracing::error!(%sid, "stream error: {e}");
+                    tracing::error!(%sid_str, "stream error: {e}");
                     break;
                 }
             }
@@ -153,7 +174,7 @@ async fn send_message(
         let _ = app_handle.emit(
             "chat-done",
             ChatDonePayload {
-                session_id: sid.clone(),
+                session_id: sid_str.clone(),
             },
         );
     });
