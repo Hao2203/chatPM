@@ -3,11 +3,11 @@ name: Build and Release Tauri App
 on:
   push:
     tags:
-      - 'v*'
+      - "v*"
   workflow_dispatch:
 
 permissions:
-  contents: write    # 添加这一行，允许创建 Release
+  contents: write # 添加这一行，允许创建 Release
 
 jobs:
   build:
@@ -20,9 +20,9 @@ jobs:
           - platform: ubuntu-22.04
             target: x86_64-unknown-linux-gnu
           - platform: macos-latest
-            target: aarch64-apple-darwin    # M 系列芯片
+            target: aarch64-apple-darwin # M 系列芯片
           - platform: macos-latest
-            target: x86_64-apple-darwin     # Intel 芯片
+            target: x86_64-apple-darwin # Intel 芯片
 
     runs-on: ${{ matrix.platform }}
 
@@ -42,7 +42,7 @@ jobs:
       - name: Cache Rust
         uses: swatinem/rust-cache@v2
         with:
-          workspaces: './src-tauri -> target'
+          workspaces: "./src-tauri -> target"
 
       # Linux 需要额外安装系统依赖
       - name: Install Linux dependencies
@@ -66,7 +66,57 @@ jobs:
           tauriScript: bunx tauri
           args: --target ${{ matrix.target }}
           tagName: ${{ github.ref_name }}
-          releaseName: 'Release ${{ github.ref_name }}'
-          releaseBody: 'See the assets to download this version.'
+          releaseName: "Release ${{ github.ref_name }}"
+          releaseBody: "See the assets to download this version."
           releaseDraft: true
           prerelease: false
+
+  build-android:
+    runs-on: ubuntu-22.04
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-linux-android,armv7-linux-androideabi,i686-linux-android,x86_64-linux-android
+
+      - name: Cache Rust
+        uses: swatinem/rust-cache@v2
+        with:
+          workspaces: "./src-tauri -> target"
+
+      - name: Setup Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 17
+
+      - name: Setup Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Install NDK
+        run: sdkmanager "ndk;25.2.9519653"
+
+      - name: Install frontend dependencies
+        run: bun install
+
+      - name: Build Android APK
+        run: |
+          export NDK_HOME=$ANDROID_HOME/ndk/25.2.9519653
+          bunx tauri android build --apk
+
+      - name: Upload APK to Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.event.inputs.tag || github.ref_name }}
+          draft: true
+          files: src-tauri/gen/android/app/build/outputs/apk/universal/release/*.apk
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
