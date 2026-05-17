@@ -158,6 +158,8 @@
 
   // ── Handle Enter key (Shift+Enter for newline, Enter to send) ──
   function handleKeydown(e: KeyboardEvent) {
+    // Don't intercept Enter during IME composition
+    if (e.isComposing || e.keyCode === 229) return;
     if (e.key === "Enter" && !e.shiftKey) {
       e.preventDefault();
       sendMessage();
@@ -287,27 +289,41 @@
     </div>
   </aside>
 
+  <!-- Mobile sidebar overlay backdrop -->
+  {#if !sidebarCollapsed}
+    <!-- svelte-ignore a11y_click_events_have_key_events -->
+    <div
+      class="sidebar-overlay"
+      role="presentation"
+      onclick={() => (sidebarCollapsed = true)}
+    ></div>
+  {/if}
+
   <!-- Main chat area -->
   <div class="chat-container">
-    {#if sidebarCollapsed}
-      <button
-        class="btn-expand-sidebar"
-        onclick={() => (sidebarCollapsed = false)}
-        title="展开侧栏"
+    <button
+      class="btn-toggle-sidebar-mobile"
+      onclick={() => (sidebarCollapsed = !sidebarCollapsed)}
+      title={sidebarCollapsed ? "打开菜单" : "关闭菜单"}
+    >
+      <svg
+        width="20"
+        height="20"
+        viewBox="0 0 24 24"
+        fill="none"
+        stroke="currentColor"
+        stroke-width="2"
+        stroke-linecap="round"
       >
-        <svg
-          width="18"
-          height="18"
-          viewBox="0 0 24 24"
-          fill="none"
-          stroke="currentColor"
-          stroke-width="2"
-          stroke-linecap="round"
-        >
-          <polyline points="9 18 15 12 9 6"></polyline>
-        </svg>
-      </button>
-    {/if}
+        {#if sidebarCollapsed}
+          <line x1="3" y1="6" x2="21" y2="6"></line>
+          <line x1="3" y1="12" x2="21" y2="12"></line>
+          <line x1="3" y1="18" x2="21" y2="18"></line>
+        {:else}
+          <polyline points="15 18 9 12 15 6"></polyline>
+        {/if}
+      </svg>
+    </button>
 
     {#if !apiKeyConfigured}
       <div class="apikey-warning">
@@ -563,6 +579,7 @@
       width 0.2s ease,
       min-width 0.2s ease;
     overflow: hidden;
+    z-index: 50;
   }
 
   .sidebar.collapsed {
@@ -576,6 +593,15 @@
     display: flex;
     flex-direction: column;
     padding: 8px;
+  }
+
+  /* Mobile sidebar overlay */
+  .sidebar-overlay {
+    display: none;
+  }
+
+  .btn-toggle-sidebar-mobile {
+    display: none;
   }
 
   .sidebar-header {
@@ -724,16 +750,16 @@
     min-width: 0;
   }
 
-  .btn-expand-sidebar {
+  .btn-toggle-sidebar-mobile {
     position: absolute;
-    top: 12px;
-    left: 12px;
+    top: 10px;
+    left: 10px;
     z-index: 10;
     display: flex;
     align-items: center;
     justify-content: center;
-    width: 32px;
-    height: 32px;
+    width: 34px;
+    height: 34px;
     border: 1px solid var(--border-color);
     border-radius: var(--radius);
     background: var(--bg-secondary);
@@ -744,7 +770,7 @@
       background 0.15s;
   }
 
-  .btn-expand-sidebar:hover {
+  .btn-toggle-sidebar-mobile:hover {
     color: var(--text-primary);
     background: var(--bg-hover);
   }
@@ -1134,5 +1160,131 @@
 
   ::-webkit-scrollbar-thumb:hover {
     background: var(--text-muted);
+  }
+
+  /* ── Mobile Responsive ──────────────────────────────────── */
+  @media (max-width: 768px) {
+    /* Sidebar becomes overlay */
+    .sidebar {
+      position: fixed;
+      top: 0;
+      left: 0;
+      height: 100vh;
+      width: 280px;
+      min-width: 280px;
+      z-index: 60;
+      box-shadow: 4px 0 24px rgba(0, 0, 0, 0.4);
+    }
+
+    .sidebar.collapsed {
+      width: 0;
+      min-width: 0;
+      box-shadow: none;
+    }
+
+    .sidebar-inner {
+      width: 280px;
+    }
+
+    /* Overlay backdrop */
+    .sidebar-overlay {
+      display: block;
+      position: fixed;
+      inset: 0;
+      background: rgba(0, 0, 0, 0.5);
+      z-index: 55;
+    }
+
+    /* Show hamburger toggle */
+    .btn-toggle-sidebar-mobile {
+      display: flex;
+    }
+
+    /* Desktop collapse button stays hidden on mobile */
+    .btn-toggle-sidebar {
+      display: none;
+    }
+
+    /* Messages */
+    .message-row {
+      padding: 12px 16px 12px 52px;
+      gap: 10px;
+      max-width: 100%;
+    }
+
+    .message-avatar {
+      width: 26px;
+    }
+
+    .avatar {
+      width: 26px;
+      height: 26px;
+    }
+
+    .message-bubble {
+      font-size: 14px;
+    }
+
+    /* Input bar */
+    .input-bar {
+      padding: 8px 12px 14px;
+      max-width: 100%;
+    }
+
+    .input-wrapper {
+      padding: 6px 6px 6px 12px;
+    }
+
+    .input-wrapper textarea {
+      font-size: 14px;
+    }
+
+    .input-hint {
+      display: none;
+    }
+
+    /* Settings modal */
+    .settings-panel {
+      width: 100%;
+      max-width: calc(100vw - 32px);
+      padding: 20px;
+      border-radius: var(--radius-lg);
+    }
+
+    .settings-header h2 {
+      font-size: 16px;
+    }
+
+    /* API key warning */
+    .apikey-warning-card {
+      padding: 24px 16px;
+    }
+
+    .apikey-warning-card h2 {
+      font-size: 20px;
+    }
+
+    /* Empty state */
+    .empty-state-content h2 {
+      font-size: 18px;
+    }
+  }
+
+  /* Very small screens */
+  @media (max-width: 480px) {
+    .message-row {
+      padding: 10px 12px 10px 44px;
+    }
+
+    .input-bar {
+      padding: 6px 8px 12px;
+    }
+
+    .btn-toggle-sidebar-mobile {
+      top: 6px;
+      left: 6px;
+      width: 30px;
+      height: 30px;
+    }
   }
 </style>
