@@ -11,6 +11,15 @@
     onsend: () => void;
   } = $props();
 
+  let textareaEl: HTMLTextAreaElement;
+
+  // Reset height when inputText is cleared externally (e.g. after sending)
+  $effect(() => {
+    if (inputText === "" && textareaEl) {
+      textareaEl.style.height = "auto";
+    }
+  });
+
   function handleKeydown(e: KeyboardEvent) {
     if (e.isComposing || e.keyCode === 229) return;
     if (e.key === "Enter" && !e.shiftKey) {
@@ -34,6 +43,7 @@
 <div class="input-bar">
   <div class="input-wrapper">
     <textarea
+      bind:this={textareaEl}
       value={inputText}
       onkeydown={handleKeydown}
       oninput={onInput}
