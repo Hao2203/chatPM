@@ -2,6 +2,7 @@
   interface SessionInfo {
     session_id: string;
     created_at: string;
+    title: string | null;
   }
 
   let {
@@ -10,6 +11,7 @@
     sidebarCollapsed = false,
     oncreate = () => {},
     onselect = (_sid: string) => {},
+    onupdatetitle = (_sid: string, _title: string) => {},
     onsettings = () => {},
   }: {
     sessions: SessionInfo[];
@@ -17,8 +19,43 @@
     sidebarCollapsed: boolean;
     oncreate: () => void;
     onselect: (sid: string) => void;
+    onupdatetitle: (sid: string, title: string) => void;
     onsettings: () => void;
   } = $props();
+
+  let editingSessionId = $state<string | null>(null);
+  let editTitle = $state("");
+
+  function startEdit(sessionId: string, currentTitle: string | null) {
+    editingSessionId = sessionId;
+    editTitle = currentTitle ?? "";
+  }
+
+  function commitEdit() {
+    if (editingSessionId && editTitle.trim()) {
+      onupdatetitle(editingSessionId, editTitle.trim());
+    }
+    editingSessionId = null;
+    editTitle = "";
+  }
+
+  function cancelEdit() {
+    editingSessionId = null;
+    editTitle = "";
+  }
+
+  function handleEditKeydown(e: KeyboardEvent) {
+    if (e.key === "Enter") {
+      e.preventDefault();
+      commitEdit();
+    } else if (e.key === "Escape") {
+      cancelEdit();
+    }
+  }
+
+  function sessionLabel(s: SessionInfo): string {
+    return s.title ?? s.session_id.slice(0, 12) + "...";
+  }
 
   function formatTime(dateStr: string): string {
     const d = new Date(dateStr);
@@ -60,6 +97,7 @@
             class="session-item"
             class:active={s.session_id === activeSessionId}
             onclick={() => onselect(s.session_id)}
+            ondblclick={() => startEdit(s.session_id, s.title)}
           >
             <svg
               class="session-icon"
@@ -75,7 +113,18 @@
                 d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"
               ></path>
             </svg>
-            <span class="session-label">{s.session_id.slice(0, 12)}...</span>
+            {#if editingSessionId === s.session_id}
+              <input
+                class="title-edit-input"
+                type="text"
+                bind:value={editTitle}
+                onkeydown={handleEditKeydown}
+                onblur={commitEdit}
+                autofocus
+              />
+            {:else}
+              <span class="session-label">{sessionLabel(s)}</span>
+            {/if}
             <span class="session-time">{formatTime(s.created_at)}</span>
           </button>
         {/each}
@@ -215,8 +264,19 @@
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
-    font-family: var(--font-mono);
-    font-size: 12px;
+    font-size: 13px;
+  }
+
+  .title-edit-input {
+    flex: 1;
+    min-width: 0;
+    padding: 2px 6px;
+    border: 1px solid var(--accent);
+    border-radius: 4px;
+    background: var(--bg-primary);
+    color: var(--text-primary);
+    font-size: 13px;
+    outline: none;
   }
 
   .session-time {

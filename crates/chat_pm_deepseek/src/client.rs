@@ -45,6 +45,62 @@ impl Client {
         Ok(Self::new(api_key))
     }
 
+    /// 非流式单次请求，返回完整响应文本。用于标题生成等轻量任务。
+    pub async fn chat_complete(
+        &self,
+        request: &ChatRequestConfig,
+        messages: &[ChatMessage],
+    ) -> Result<String> {
+        let req_messages: Vec<_> = messages
+            .iter()
+            .map(|m| {
+                json!({
+                    "role": m.role.as_str(),
+                    "content": m.content,
+                })
+            })
+            .collect();
+
+        let mut body = json!({
+            "model": request.model,
+            "messages": req_messages,
+            "max_tokens": request.max_tokens,
+            "stream": false,
+            "thinking": {
+                "type": if request.thinking_enabled { "enabled" } else { "disabled" }
+            }
+        });
+
+        if let Some(obj) = body.as_object_mut()
+            && let Some(effort) = request.reasoning_effort
+        {
+            obj.insert("reasoning_effort".to_string(), json!(effort.as_str()));
+        }
+
+        let resp: ChatCompleteResponse = self
+            .http
+            .post(format!("{}/chat/completions", self.api_base))
+            .header(AUTHORIZATION, format!("Bearer {}", self.api_key.expose_secret()))
+            .header(CONTENT_TYPE, "application/json")
+            .json(&body)
+            .send()
+            .await
+            .context("chat completion request failed")?
+            .error_for_status()
+            .context("chat completion returned error status")?
+            .json()
+            .await
+            .context("failed to parse chat completion response")?;
+
+        let choice = resp
+            .choices
+            .into_iter()
+            .next()
+            .context("模型未返回 choice")?;
+
+        Ok(choice.message.content)
+    }
+
     pub async fn stream_chat(
         &self,
         request: &ChatRequestConfig,
@@ -157,6 +213,21 @@ impl Client {
 struct ChatStreamResponse {
     choices: Vec<ChatChoice>,
     usage: Option<Usage>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ChatCompleteResponse {
+    choices: Vec<ChatCompleteChoice>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ChatCompleteChoice {
+    message: ChatCompleteMessage,
+}
+
+#[derive(Debug, Deserialize)]
+struct ChatCompleteMessage {
+    content: String,
 }
 
 #[derive(Debug, Deserialize)]

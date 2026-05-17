@@ -17,6 +17,7 @@
   interface SessionInfo {
     session_id: string;
     created_at: string;
+    title: string | null;
   }
 
   // ── State ──────────────────────────────────────────────────
@@ -60,6 +61,17 @@
   // ── Load sessions ──────────────────────────────────────────
   async function loadSessions() {
     sessions = await invoke<SessionInfo[]>("list_sessions");
+  }
+
+  // ── Update session title ───────────────────────────────────
+  async function updateSessionTitle(sid: string, title: string) {
+    await invoke("update_session_title", { sessionId: sid, title });
+    // Optimistic local update
+    const s = sessions.find((s) => s.session_id === sid);
+    if (s) {
+      s.title = title;
+      sessions = [...sessions];
+    }
   }
 
   // ── Start new chat (lazy: no backend call yet) ─────────────
@@ -208,6 +220,29 @@
       apiKeyConfigured = ok;
     });
     loadSessions();
+
+    // Listen for title updates (AI-generated or manual)
+    const setupTitleListener = async () => {
+      const unlisten = await listen<{ session_id: string; title: string }>(
+        "session-title-updated",
+        (event) => {
+          const s = sessions.find(
+            (s) => s.session_id === event.payload.session_id,
+          );
+          if (s) {
+            s.title = event.payload.title;
+            sessions = [...sessions];
+          }
+        },
+      );
+      return unlisten;
+    };
+    let unlistenTitle: UnlistenFn | null = null;
+    setupTitleListener().then((fn) => (unlistenTitle = fn));
+
+    return () => {
+      if (unlistenTitle) unlistenTitle();
+    };
   });
 </script>
 
@@ -218,6 +253,7 @@
     {sidebarCollapsed}
     oncreate={startNewChat}
     onselect={selectSession}
+    onupdatetitle={updateSessionTitle}
     onsettings={() => (showSettings = true)}
   />
 

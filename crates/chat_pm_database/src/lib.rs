@@ -15,6 +15,7 @@ const SCHEMA_SQL: &str = "
 CREATE TABLE IF NOT EXISTS sessions (
     session_id  TEXT PRIMARY KEY,
     created_at  TEXT NOT NULL,
+    title        TEXT,
     user_persona TEXT
 );
 
@@ -41,6 +42,7 @@ CREATE TABLE IF NOT EXISTS config (
 pub struct SessionRecord {
     pub session_id: String,
     pub created_at: DateTime<Utc>,
+    pub title: Option<String>,
     pub user_persona: Option<String>,
 }
 
@@ -92,6 +94,7 @@ impl MemoryDb {
         self.upsert_session(SessionRecord {
             session_id: session_id.to_string(),
             created_at: Utc::now(),
+            title: None,
             user_persona: None,
         });
     }
@@ -103,14 +106,16 @@ impl MemoryDb {
     pub fn upsert_session(&self, record: SessionRecord) {
         let conn = self.conn.lock().unwrap();
         conn.execute(
-            "INSERT INTO sessions (session_id, created_at, user_persona)
-             VALUES (?1, ?2, ?3)
+            "INSERT INTO sessions (session_id, created_at, title, user_persona)
+             VALUES (?1, ?2, ?3, ?4)
              ON CONFLICT(session_id) DO UPDATE SET
                  created_at   = excluded.created_at,
+                 title        = excluded.title,
                  user_persona = excluded.user_persona",
             params![
                 record.session_id,
                 record.created_at.to_rfc3339(),
+                record.title,
                 record.user_persona,
             ],
         )
@@ -120,7 +125,7 @@ impl MemoryDb {
     pub fn get_session(&self, session_id: &str) -> Option<SessionRecord> {
         let conn = self.conn.lock().unwrap();
         conn.query_row(
-            "SELECT session_id, created_at, user_persona FROM sessions WHERE session_id = ?1",
+            "SELECT session_id, created_at, title, user_persona FROM sessions WHERE session_id = ?1",
             params![session_id],
             |row| {
                 let created_at: String = row.get(1)?;
@@ -129,7 +134,8 @@ impl MemoryDb {
                     created_at: DateTime::parse_from_rfc3339(&created_at)
                         .unwrap()
                         .with_timezone(&Utc),
-                    user_persona: row.get(2)?,
+                    title: row.get(2)?,
+                    user_persona: row.get(3)?,
                 })
             },
         )
@@ -140,7 +146,7 @@ impl MemoryDb {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn
             .prepare(
-                "SELECT session_id, created_at, user_persona FROM sessions ORDER BY created_at DESC",
+                "SELECT session_id, created_at, title, user_persona FROM sessions ORDER BY created_at DESC",
             )
             .unwrap();
         stmt.query_map([], |row| {
@@ -150,12 +156,32 @@ impl MemoryDb {
                 created_at: DateTime::parse_from_rfc3339(&created_at)
                     .unwrap()
                     .with_timezone(&Utc),
-                user_persona: row.get(2)?,
+                title: row.get(2)?,
+                user_persona: row.get(3)?,
             })
         })
         .unwrap()
         .filter_map(|r| r.ok())
         .collect()
+    }
+
+    pub fn set_session_title(&self, session_id: &str, title: &str) {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "UPDATE sessions SET title = ?1 WHERE session_id = ?2",
+            params![title, session_id],
+        )
+        .unwrap();
+    }
+
+    pub fn get_session_title(&self, session_id: &str) -> Option<String> {
+        let conn = self.conn.lock().unwrap();
+        conn.query_row(
+            "SELECT title FROM sessions WHERE session_id = ?1",
+            params![session_id],
+            |row| row.get(0),
+        )
+        .ok()
     }
 
     // ── Turns ───────────────────────────────────────────────────

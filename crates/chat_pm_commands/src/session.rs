@@ -8,7 +8,7 @@ use uuid::Uuid;
 use chat_pm_session::{
     chat::{MessageFrame, ReplyReceiver, StopReason},
     context::Context,
-    message::UserInput,
+    message::{ChatMessage, UserInput},
     prompt::{PromptComposer, SystemPrompt},
 };
 
@@ -124,6 +124,40 @@ impl ChatPipeline {
         }
     }
 
+    pub fn set_session_title(&self, handle: &SessionHandle, title: &str) {
+        let session_id = handle.id().to_string();
+        self.db.set_session_title(&session_id, title);
+        info!(%session_id, %title, "会话标题已更新");
+    }
+
+    /// 根据用户首条消息生成会话标题（仅在新会话的首轮调用）
+    async fn generate_title(&self, session_id: &str, user_input: &UserInput) -> Result<()> {
+        let prompt = format!(
+            "根据以下对话内容，生成一个简洁的标题（不超过10个字，不要加引号）：\n{}",
+            user_input
+        );
+        let messages = vec![
+            ChatMessage::system("你是一个标题生成助手，只输出标题文本，不输出任何其他内容。"),
+            ChatMessage::user(prompt),
+        ];
+        let title = self
+            .client
+            .chat_complete(
+                &ChatRequestConfig {
+                    model: self.config.chat_model.clone(),
+                    max_tokens: 32,
+                    thinking_enabled: false,
+                    reasoning_effort: None,
+                },
+                &messages,
+            )
+            .await?;
+        let title = title.trim().trim_matches(&['"', '\'', '《', '》', '「', '」']).to_string();
+        self.db.set_session_title(session_id, &title);
+        info!(%session_id, %title, "标题已生成");
+        Ok(())
+    }
+
     pub async fn chat(
         &self,
         handle: &SessionHandle,
@@ -132,9 +166,16 @@ impl ChatPipeline {
         let session_id = handle.id().to_string();
         info!(%session_id, "开始处理");
 
+        // 首轮对话：先生成标题，再进行回复
         let recent_memory = self
             .db
             .load_recent_memory(&session_id, self.config.short_term_turns);
+        let is_first_turn = recent_memory.is_empty();
+        if is_first_turn {
+            if let Err(e) = self.generate_title(&session_id, &user_input).await {
+                tracing::warn!(%session_id, error = %e, "标题生成失败，继续回复");
+            }
+        }
         debug!(count = recent_memory.len(), "短期记忆加载完成");
 
         let system_prompt = SystemPrompt {

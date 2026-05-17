@@ -26,9 +26,16 @@ struct ChatDonePayload {
 }
 
 #[derive(Debug, Clone, Serialize)]
+struct SessionTitlePayload {
+    session_id: String,
+    title: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
 struct SessionInfo {
     session_id: String,
     created_at: String,
+    title: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -110,6 +117,17 @@ async fn send_message(
         .await
         .map_err(|e| e.to_string())?;
 
+    // Emit title if it was just generated (first turn)
+    if let Some(title) = state.db.get_session_title(&session_id) {
+        let _ = app.emit(
+            "session-title-updated",
+            SessionTitlePayload {
+                session_id: session_id.clone(),
+                title,
+            },
+        );
+    }
+
     let sid = session_id.clone();
     let app_handle = app.clone();
 
@@ -151,6 +169,7 @@ fn list_sessions(state: State<'_, AppState>) -> Result<Vec<SessionInfo>, String>
         .map(|s| SessionInfo {
             session_id: s.session_id,
             created_at: s.created_at.to_rfc3339(),
+            title: s.title,
         })
         .collect())
 }
@@ -167,6 +186,24 @@ fn get_turns(state: State<'_, AppState>, session_id: String) -> Result<Vec<TurnI
         })
         .collect();
     Ok(infos)
+}
+
+#[tauri::command]
+fn update_session_title(
+    app: tauri::AppHandle,
+    state: State<'_, AppState>,
+    session_id: String,
+    title: String,
+) -> Result<(), String> {
+    state.db.set_session_title(&session_id, &title);
+    let _ = app.emit(
+        "session-title-updated",
+        SessionTitlePayload {
+            session_id,
+            title,
+        },
+    );
+    Ok(())
 }
 
 // ── Entry point ─────────────────────────────────────────────────────
@@ -207,6 +244,7 @@ pub fn run() {
             send_message,
             list_sessions,
             get_turns,
+            update_session_title,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
