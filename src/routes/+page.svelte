@@ -1,6 +1,18 @@
 <script lang="ts">
   import { invoke } from "@tauri-apps/api/core";
   import { listen, type UnlistenFn } from "@tauri-apps/api/event";
+  import { marked } from "marked";
+
+  // ── Marked configuration ───────────────────────────────────
+  marked.use({
+    gfm: true,
+    breaks: true,
+  });
+
+  function renderMarkdown(text: string): string {
+    if (!text) return "";
+    return marked.parse(text) as string;
+  }
 
   // ── Types ──────────────────────────────────────────────────
   interface Message {
@@ -400,8 +412,8 @@
               {/if}
             </div>
             <div class="message-content">
-              <div class="message-bubble">
-                <pre>{msg.content}</pre>
+              <div class="message-bubble markdown-body">
+                {@html renderMarkdown(msg.content)}
                 {#if msg.streaming}
                   <span class="cursor">|</span>
                 {/if}
@@ -901,11 +913,128 @@
     color: var(--text-primary);
   }
 
-  .message-bubble pre {
-    white-space: pre-wrap;
-    word-break: break-word;
-    font-family: var(--font-sans);
-    line-height: 1.7;
+  /* ── Markdown body styles (global for {@html}) ───────── */
+  :global {
+    .markdown-body > *:first-child {
+      margin-top: 0;
+    }
+
+    .markdown-body > *:last-child {
+      margin-bottom: 0;
+    }
+
+    .markdown-body p {
+      margin: 0.5em 0;
+      white-space: pre-wrap;
+    }
+
+    .markdown-body h1,
+    .markdown-body h2,
+    .markdown-body h3,
+    .markdown-body h4,
+    .markdown-body h5,
+    .markdown-body h6 {
+      margin: 1em 0 0.5em;
+      font-weight: 600;
+      line-height: 1.4;
+    }
+
+    .markdown-body h1 { font-size: 1.5em; }
+    .markdown-body h2 { font-size: 1.3em; }
+    .markdown-body h3 { font-size: 1.15em; }
+    .markdown-body h4 { font-size: 1em; }
+
+    .markdown-body ul,
+    .markdown-body ol {
+      margin: 0.5em 0;
+      padding-left: 1.5em;
+    }
+
+    .markdown-body li {
+      margin: 0.2em 0;
+    }
+
+    .markdown-body code {
+      background: rgba(0, 0, 0, 0.3);
+      padding: 2px 6px;
+      border-radius: 4px;
+      font-family: var(--font-mono);
+      font-size: 0.9em;
+    }
+
+    .markdown-body pre {
+      margin: 0.8em 0;
+      padding: 12px 16px;
+      background: #1e1e2e;
+      border: 1px solid var(--border-color);
+      border-radius: var(--radius);
+      overflow-x: auto;
+    }
+
+    .markdown-body pre code {
+      background: none;
+      padding: 0;
+      border-radius: 0;
+      font-size: 0.85em;
+      line-height: 1.6;
+      color: #cdd6f4;
+    }
+
+    .markdown-body blockquote {
+      margin: 0.8em 0;
+      padding: 4px 12px;
+      border-left: 3px solid var(--accent);
+      color: var(--text-secondary);
+      background: rgba(255, 255, 255, 0.03);
+      border-radius: 0 4px 4px 0;
+    }
+
+    .markdown-body blockquote p {
+      margin: 0.3em 0;
+    }
+
+    .markdown-body table {
+      margin: 0.8em 0;
+      border-collapse: collapse;
+      width: 100%;
+      font-size: 0.9em;
+    }
+
+    .markdown-body th,
+    .markdown-body td {
+      padding: 8px 12px;
+      border: 1px solid var(--border-color);
+      text-align: left;
+    }
+
+    .markdown-body th {
+      background: var(--bg-surface);
+      font-weight: 600;
+    }
+
+    .markdown-body tr:nth-child(even) {
+      background: rgba(255, 255, 255, 0.02);
+    }
+
+    .markdown-body a {
+      color: var(--accent);
+      text-decoration: underline;
+    }
+
+    .markdown-body hr {
+      margin: 1em 0;
+      border: none;
+      border-top: 1px solid var(--border-color);
+    }
+
+    .markdown-body img {
+      max-width: 100%;
+      border-radius: var(--radius);
+    }
+
+    .markdown-body strong {
+      font-weight: 700;
+    }
   }
 
   .cursor {
