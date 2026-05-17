@@ -82,6 +82,14 @@
     max-width: 820px;
     width: 100%;
     margin: 0 auto;
+    box-sizing: border-box;
+  }
+
+  /* Narrower desktops: reduce horizontal padding before mobile breakpoint */
+  @media (max-width: 900px) {
+    .input-bar {
+      padding: 12px 20px 20px;
+    }
   }
 
   .input-wrapper {

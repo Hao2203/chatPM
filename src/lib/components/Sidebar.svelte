@@ -124,11 +124,13 @@
   }
 
   .sidebar-inner {
-    width: 100%;
+    width: 260px;
+    min-width: 260px;
     height: 100%;
     display: flex;
     flex-direction: column;
     padding: 8px;
+    overflow: hidden;
   }
 
   .sidebar-header {
@@ -149,6 +151,7 @@
     font-size: 14px;
     cursor: pointer;
     transition: background 0.15s;
+    white-space: nowrap;
   }
 
   .btn-new-chat:hover {
@@ -241,6 +244,7 @@
     font-size: 14px;
     cursor: pointer;
     transition: background 0.15s;
+    white-space: nowrap;
   }
 
   .btn-settings:hover {
@@ -263,6 +267,11 @@
       width: 0;
       min-width: 0;
       box-shadow: none;
+    }
+
+    .sidebar-inner {
+      width: 280px;
+      min-width: 280px;
     }
   }
 </style>
