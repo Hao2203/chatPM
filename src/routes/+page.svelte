@@ -36,6 +36,12 @@
   let messageId = $state(0);
   let sending = $state(false);
   let sessionToDelete = $state<string | null>(null);
+  let contextTokens = $state(0);
+  const CONTEXT_WINDOW = 1_048_576; // must match PipelineConfig.context_window
+
+  function formatNumber(n: number): string {
+    return n.toLocaleString("en-US");
+  }
 
   // 提取错误消息（兼容 AppError { kind, message } 和字符串）
   function getErrorMessage(e: any): string {
@@ -111,6 +117,7 @@
     pendingNewChat = true;
     messages = [];
     messageId = 0;
+    contextTokens = 0;
     loadDraft(null);
   }
 
@@ -122,11 +129,13 @@
     loadDraft(sid);
 
     const turns = await invoke<
-      { turn_num: number; user_text: string; assistant_text: string }[]
+      { turn_num: number; user_text: string; assistant_text: string; prompt_tokens: number | null; completion_tokens: number | null }[]
     >("get_turns", { sessionId: sid });
 
     messages = [];
     let mid = 0;
+    // Track the latest prompt_tokens from the most recent assistant turn
+    contextTokens = 0;
     for (const t of turns) {
       messages.push({
         id: ++mid,
@@ -140,6 +149,9 @@
         content: t.assistant_text,
         streaming: false,
       });
+      if (t.prompt_tokens != null) {
+        contextTokens = t.prompt_tokens;
+      }
     }
     messageId = mid;
   }
@@ -212,7 +224,7 @@
       },
     );
 
-    unlistenDone = await listen<{ session_id: string }>(
+    unlistenDone = await listen<{ session_id: string; prompt_tokens?: number }>(
       "chat-done",
       (event) => {
         if (event.payload.session_id === activeSessionId) {
@@ -220,6 +232,9 @@
           if (msg) {
             msg.streaming = false;
             messages = [...messages];
+          }
+          if (event.payload.prompt_tokens != null) {
+            contextTokens = event.payload.prompt_tokens;
           }
           if (unlistenChunk) unlistenChunk();
           if (unlistenDone) unlistenDone();
@@ -384,6 +399,22 @@
         oninputtextchange={(val: string) => (inputText = val)}
         onsend={sendMessage}
       />
+      {#if contextTokens > 0}
+        <div class="token-bar">
+          <div class="token-bar-inner">
+            <div
+              class="token-fill"
+              class:warn={contextTokens > CONTEXT_WINDOW * 0.6}
+              class:critical={contextTokens > CONTEXT_WINDOW * 0.9}
+              style="width: {Math.min(100, (contextTokens / CONTEXT_WINDOW) * 100)}%"
+            ></div>
+          </div>
+          <span class="token-label" class:warn={contextTokens > CONTEXT_WINDOW * 0.6} class:critical={contextTokens > CONTEXT_WINDOW * 0.9}>
+            {formatNumber(contextTokens)} / {formatNumber(CONTEXT_WINDOW)} tokens
+            ({(contextTokens / CONTEXT_WINDOW * 100).toFixed(1)}%)
+          </span>
+        </div>
+      {/if}
     {/if}
   </div>
 </div>
@@ -739,5 +770,70 @@
       width: 30px;
       height: 30px;
     }
+  }
+
+  /* ── Token Bar ──────────────────────────────────────────── */
+  .token-bar {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    max-width: 820px;
+    width: 100%;
+    margin: 0 auto;
+    padding: 4px 40px 6px;
+    box-sizing: border-box;
+  }
+
+  @media (max-width: 900px) {
+    .token-bar {
+      padding: 4px 20px 6px;
+    }
+  }
+
+  @media (max-width: 768px) {
+    .token-bar {
+      padding: 2px 12px 4px;
+      max-width: 100%;
+    }
+  }
+
+  .token-bar-inner {
+    flex: 1;
+    height: 4px;
+    background: var(--border-color);
+    border-radius: 2px;
+    overflow: hidden;
+    min-width: 0;
+  }
+
+  .token-fill {
+    height: 100%;
+    background: var(--accent);
+    border-radius: 2px;
+    transition: width 0.3s ease;
+  }
+
+  .token-fill.warn {
+    background: #eab308;
+  }
+
+  .token-fill.critical {
+    background: var(--danger);
+  }
+
+  .token-label {
+    font-size: 11px;
+    color: var(--text-muted);
+    white-space: nowrap;
+    font-family: var(--font-mono);
+    transition: color 0.3s ease;
+  }
+
+  .token-label.warn {
+    color: #eab308;
+  }
+
+  .token-label.critical {
+    color: var(--danger);
   }
 </style>

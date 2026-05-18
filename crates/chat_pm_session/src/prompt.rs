@@ -1,6 +1,7 @@
 use crate::{
     context::Context,
     language::Language,
+    memory::Memory,
     message::{ChatMessage, UserInput},
     session::SessionId,
 };
@@ -107,5 +108,60 @@ impl TitlePrompt {
             "根据以下对话内容，生成一个简洁的标题（不超过10个字，不要加引号）：\n{}",
             user_input
         )
+    }
+}
+
+// ── Summary generation ──────────────────────────────────────────────────
+
+/// 摘要生成请求。包含现有摘要（如有）和需要纳入的新轮次。
+///
+/// 调用方先通过 `turn_range_to_summarize()` 计算出轮次范围，
+/// 从 DB 加载对应轮次后构造此类型，再调用 `compose()` 获取 LLM 消息列表。
+#[derive(Debug, Clone)]
+pub struct SummaryPrompt {
+    existing_summary: Option<String>,
+    turns: Vec<Memory>,
+}
+
+impl SummaryPrompt {
+    pub fn new(existing_summary: Option<String>, turns: Vec<Memory>) -> Self {
+        Self {
+            existing_summary,
+            turns,
+        }
+    }
+
+    /// 组装为完整的消息列表，供 LLM 调用方使用。
+    pub fn compose(&self) -> Vec<ChatMessage> {
+        let mut content = String::new();
+
+        if let Some(ref summary) = self.existing_summary {
+            content.push_str("## 现有摘要\n");
+            content.push_str(summary);
+            content.push_str("\n\n");
+        }
+
+        content.push_str("## 新的对话内容\n");
+        for (i, turn) in self.turns.iter().enumerate() {
+            content.push_str(&format!("用户: {}\n", turn.user_text));
+            content.push_str(&format!("助手: {}\n", turn.assistant_text));
+            if i < self.turns.len() - 1 {
+                content.push('\n');
+            }
+        }
+
+        vec![
+            ChatMessage::system(Self::system_prompt()),
+            ChatMessage::user(content),
+        ]
+    }
+
+    fn system_prompt() -> String {
+        "你是一个专业的对话摘要助手。你的任务是将对话内容浓缩为简洁但信息完整的摘要。\
+         保留所有关键信息、用户偏好、重要决定和具体细节。\
+         如果提供了现有摘要，请将其与新内容融合，生成一份连贯的更新后摘要。\
+         如果新对话与现有摘要内容重复，保留信息更完整的一方。\
+         只输出摘要文本，不输出任何其他内容。"
+            .to_string()
     }
 }

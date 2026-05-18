@@ -30,6 +30,8 @@ struct ChatChunkPayload {
 #[derive(Debug, Clone, Serialize)]
 struct ChatDonePayload {
     session_id: String,
+    prompt_tokens: Option<usize>,
+    completion_tokens: Option<usize>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -55,6 +57,8 @@ struct TurnInfo {
     turn_num: u64,
     user_text: String,
     assistant_text: String,
+    prompt_tokens: Option<i64>,
+    completion_tokens: Option<i64>,
 }
 
 // ── Helper ──────────────────────────────────────────────────────────
@@ -162,9 +166,18 @@ async fn send_message(
 
     // Spawn a task to forward streaming chunks as Tauri events
     tokio::spawn(async move {
+        let mut prompt_tokens = None;
+        let mut completion_tokens = None;
+
         while let Some(result) = stream.recv().await {
             match result {
                 Ok(frame) => {
+                    if let Some(pt) = frame.prompt_tokens {
+                        prompt_tokens = Some(pt);
+                    }
+                    if let Some(ct) = frame.completion_tokens {
+                        completion_tokens = Some(ct);
+                    }
                     let _ = app_handle.emit(
                         "chat-chunk",
                         ChatChunkPayload {
@@ -183,6 +196,8 @@ async fn send_message(
             "chat-done",
             ChatDonePayload {
                 session_id: sid_str.clone(),
+                prompt_tokens,
+                completion_tokens,
             },
         );
     });
@@ -212,6 +227,8 @@ fn get_turns(state: State<'_, AppState>, session_id: String) -> Result<Vec<TurnI
             turn_num: t.turn_id.0,
             user_text: t.user_text,
             assistant_text: t.assistant_text,
+            prompt_tokens: t.prompt_tokens,
+            completion_tokens: t.completion_tokens,
         })
         .collect();
     Ok(infos)

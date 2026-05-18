@@ -17,6 +17,14 @@ pub enum StopReason {
 
 pub struct MessageFrame {
     pub content: String,
+    pub prompt_tokens: Option<usize>,
+    pub completion_tokens: Option<usize>,
+}
+
+impl MessageFrame {
+    pub fn has_token_info(&self) -> bool {
+        self.prompt_tokens.is_some()
+    }
 }
 
 #[derive(Debug, Default)]
@@ -33,6 +41,8 @@ impl ReplyReceiver {
         self.content.push_str(text);
         MessageFrame {
             content: text.into(),
+            prompt_tokens: None,
+            completion_tokens: None,
         }
     }
 

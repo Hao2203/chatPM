@@ -18,6 +18,7 @@ pub struct ChatRequestConfig {
 #[derive(Debug, Clone)]
 pub struct ChatChunk {
     pub raw_text: String,
+    pub prompt_tokens: usize,
     pub completion_tokens: usize,
     pub stop_reason: Option<StopReason>,
 }
@@ -121,6 +122,7 @@ impl Client {
             "messages": req_messages,
             "max_tokens": request.max_tokens,
             "stream": true,
+            "stream_options": { "include_usage": true },
             "thinking": {
                 "type": if request.thinking_enabled { "enabled" } else { "disabled" }
             }
@@ -177,6 +179,16 @@ impl Client {
                         serde_json::from_str(data).map_err(|e| ApiError::ParseFailed(e.to_string()));
 
                     let frame = parsed.and_then(|resp| {
+                        // Usage-only chunk after streaming ends (choices empty, usage present)
+                        if resp.choices.is_empty() {
+                            return Ok(ChatChunk {
+                                raw_text: String::new(),
+                                prompt_tokens: resp.usage.as_ref().map(|u| u.prompt_tokens).unwrap_or(0),
+                                completion_tokens: resp.usage.as_ref().map(|u| u.completion_tokens).unwrap_or(0),
+                                stop_reason: None,
+                            });
+                        }
+
                         let choice = resp
                             .choices
                             .into_iter()
@@ -193,7 +205,8 @@ impl Client {
 
                         Ok(ChatChunk {
                             raw_text,
-                            completion_tokens: resp.usage.map(|u| u.completion_tokens).unwrap_or(0),
+                            prompt_tokens: resp.usage.as_ref().map(|u| u.prompt_tokens).unwrap_or(0),
+                            completion_tokens: resp.usage.as_ref().map(|u| u.completion_tokens).unwrap_or(0),
                             stop_reason: choice.finish_reason.as_deref().map(map_finish_reason),
                         })
                     });
@@ -242,8 +255,9 @@ struct ChatDelta {
     reasoning_content: Option<String>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 struct Usage {
+    prompt_tokens: usize,
     completion_tokens: usize,
 }
 

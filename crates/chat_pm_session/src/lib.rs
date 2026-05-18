@@ -6,9 +6,10 @@ pub mod memory;
 pub mod message;
 pub mod prompt;
 pub mod session;
+pub mod summarization;
 pub mod summary;
 
 pub use chat::{Role, TurnId};
 pub use error::ChatError;
-pub use prompt::TitlePrompt;
+pub use prompt::{SummaryPrompt, TitlePrompt};
 pub use session::{NewSession, Session, SessionId, Title};

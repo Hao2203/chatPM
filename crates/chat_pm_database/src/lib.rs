@@ -34,6 +34,19 @@ CREATE TABLE IF NOT EXISTS config (
     key   TEXT PRIMARY KEY,
     value TEXT NOT NULL
 );
+
+CREATE TABLE IF NOT EXISTS summaries (
+    session_id    TEXT PRIMARY KEY,
+    content       TEXT NOT NULL,
+    last_turn_num INTEGER NOT NULL,
+    created_at    TEXT NOT NULL,
+    FOREIGN KEY (session_id) REFERENCES sessions(session_id)
+);
+";
+
+const MIGRATE_V1_SQL: &str = "
+ALTER TABLE turns ADD COLUMN prompt_tokens INTEGER;
+ALTER TABLE turns ADD COLUMN completion_tokens INTEGER;
 ";
 
 // ── Domain records ──────────────────────────────────────────────────
@@ -53,6 +66,8 @@ pub struct TurnRecord {
     pub user_text: String,
     pub assistant_text: String,
     pub created_at: DateTime<Utc>,
+    pub prompt_tokens: Option<i64>,
+    pub completion_tokens: Option<i64>,
 }
 
 #[derive(Debug)]
@@ -93,6 +108,8 @@ impl MemoryDb {
         let conn = Connection::open(path)?;
         conn.execute_batch("PRAGMA journal_mode=WAL; PRAGMA foreign_keys=ON;")?;
         conn.execute_batch(SCHEMA_SQL)?;
+        // Run migration (ignore errors if columns already exist)
+        let _ = conn.execute_batch(MIGRATE_V1_SQL);
         Ok(Self {
             conn: Arc::new(Mutex::new(conn)),
         })
@@ -102,6 +119,7 @@ impl MemoryDb {
     pub fn open_in_memory() -> DbResult<Self> {
         let conn = Connection::open_in_memory()?;
         conn.execute_batch(SCHEMA_SQL)?;
+        let _ = conn.execute_batch(MIGRATE_V1_SQL);
         Ok(Self {
             conn: Arc::new(Mutex::new(conn)),
         })
@@ -127,6 +145,10 @@ impl MemoryDb {
         conn.execute_batch("BEGIN")?;
         conn.execute(
             "DELETE FROM turns WHERE session_id = ?1",
+            params![session_id],
+        )?;
+        conn.execute(
+            "DELETE FROM summaries WHERE session_id = ?1",
             params![session_id],
         )?;
         let rows = conn.execute(
@@ -219,6 +241,8 @@ impl MemoryDb {
         session_id: &str,
         user_text: String,
         assistant_text: String,
+        prompt_tokens: Option<i64>,
+        completion_tokens: Option<i64>,
     ) -> DbResult<()> {
         let turn_id = self.next_turn_id(session_id)?;
         self.append_turn(TurnRecord {
@@ -227,20 +251,24 @@ impl MemoryDb {
             user_text,
             assistant_text,
             created_at: Utc::now(),
+            prompt_tokens,
+            completion_tokens,
         })
     }
 
     pub fn append_turn(&self, record: TurnRecord) -> DbResult<()> {
         let conn = self.lock_conn()?;
         conn.execute(
-            "INSERT INTO turns (session_id, turn_num, user_text, assistant_text, created_at)
-             VALUES (?1, ?2, ?3, ?4, ?5)",
+            "INSERT INTO turns (session_id, turn_num, user_text, assistant_text, created_at, prompt_tokens, completion_tokens)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
             params![
                 record.session_id,
                 record.turn_id.0,
                 record.user_text,
                 record.assistant_text,
                 record.created_at.to_rfc3339(),
+                record.prompt_tokens,
+                record.completion_tokens,
             ],
         )?;
         Ok(())
@@ -249,7 +277,7 @@ impl MemoryDb {
     pub fn recent_turns(&self, session_id: &str, n: usize) -> DbResult<Vec<TurnRecord>> {
         let conn = self.lock_conn()?;
         let mut stmt = conn.prepare(
-            "SELECT turn_num, session_id, user_text, assistant_text, created_at
+            "SELECT turn_num, session_id, user_text, assistant_text, created_at, prompt_tokens, completion_tokens
              FROM turns
              WHERE session_id = ?1
              ORDER BY turn_num DESC
@@ -265,6 +293,8 @@ impl MemoryDb {
                     user_text: row.get(2)?,
                     assistant_text: row.get(3)?,
                     created_at: parse_rfc3339(&created_at)?,
+                    prompt_tokens: row.get(5)?,
+                    completion_tokens: row.get(6)?,
                 })
             })?
             .collect::<Result<Vec<_>, _>>()?;
@@ -289,6 +319,78 @@ impl MemoryDb {
             |row| row.get(0),
         )?;
         Ok(TurnId(max as u64 + 1))
+    }
+
+    // ── Summaries ───────────────────────────────────────────────
+
+    /// 插入或更新会话摘要。
+    pub fn upsert_summary(
+        &self,
+        session_id: &str,
+        content: &str,
+        last_turn_num: i64,
+    ) -> DbResult<()> {
+        let conn = self.lock_conn()?;
+        conn.execute(
+            "INSERT INTO summaries (session_id, content, last_turn_num, created_at)
+             VALUES (?1, ?2, ?3, ?4)
+             ON CONFLICT(session_id) DO UPDATE SET
+                 content = excluded.content,
+                 last_turn_num = excluded.last_turn_num,
+                 created_at = excluded.created_at",
+            params![session_id, content, last_turn_num, Utc::now().to_rfc3339()],
+        )?;
+        Ok(())
+    }
+
+    /// 读取会话摘要，返回 `(content, last_turn_num)`。
+    pub fn get_summary(&self, session_id: &str) -> DbResult<Option<(String, i64)>> {
+        let conn = self.lock_conn()?;
+        Ok(conn
+            .query_row(
+                "SELECT content, last_turn_num FROM summaries WHERE session_id = ?1",
+                params![session_id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()?)
+    }
+
+    /// 统计会话的总轮次数。
+    pub fn count_turns(&self, session_id: &str) -> DbResult<u64> {
+        let conn = self.lock_conn()?;
+        let count: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM turns WHERE session_id = ?1",
+            params![session_id],
+            |row| row.get(0),
+        )?;
+        Ok(count as u64)
+    }
+
+    /// 按 turn_num 范围读取轮次（包含两端），按时间顺序返回。
+    pub fn get_turns_range(
+        &self,
+        session_id: &str,
+        from: u64,
+        to: u64,
+    ) -> DbResult<Vec<Memory>> {
+        let conn = self.lock_conn()?;
+        let mut stmt = conn.prepare(
+            "SELECT turn_num, user_text, assistant_text
+             FROM turns
+             WHERE session_id = ?1 AND turn_num BETWEEN ?2 AND ?3
+             ORDER BY turn_num ASC",
+        )?;
+
+        let rows = stmt
+            .query_map(params![session_id, from as i64, to as i64], |row| {
+                Ok(Memory {
+                    user_text: row.get(1)?,
+                    assistant_text: row.get(2)?,
+                })
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+
+        Ok(rows)
     }
 
     // ── Config ──────────────────────────────────────────────────
