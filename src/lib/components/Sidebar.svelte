@@ -12,6 +12,7 @@
     oncreate = () => {},
     onselect = (_sid: string) => {},
     onupdatetitle = (_sid: string, _title: string) => {},
+    ondelete = (_sid: string) => {},
     onsettings = () => {},
   }: {
     sessions: SessionInfo[];
@@ -20,11 +21,17 @@
     oncreate: () => void;
     onselect: (sid: string) => void;
     onupdatetitle: (sid: string, title: string) => void;
+    ondelete: (sid: string) => void;
     onsettings: () => void;
   } = $props();
 
   let editingSessionId = $state<string | null>(null);
   let editTitle = $state("");
+  let editInputEl = $state<HTMLInputElement | null>(null);
+
+  $effect(() => {
+    editInputEl?.focus();
+  });
 
   function startEdit(sessionId: string, currentTitle: string | null) {
     editingSessionId = sessionId;
@@ -118,14 +125,47 @@
                 class="title-edit-input"
                 type="text"
                 bind:value={editTitle}
+                bind:this={editInputEl}
                 onkeydown={handleEditKeydown}
                 onblur={commitEdit}
-                autofocus
               />
             {:else}
               <span class="session-label">{sessionLabel(s)}</span>
             {/if}
             <span class="session-time">{formatTime(s.created_at)}</span>
+            <span
+              class="btn-delete"
+              title="删除会话"
+              role="button"
+              tabindex="0"
+              onclick={(e) => {
+                e.stopPropagation();
+                ondelete(s.session_id);
+              }}
+              onkeydown={(e) => {
+                if (e.key === 'Enter' || e.key === ' ') {
+                  e.preventDefault();
+                  e.stopPropagation();
+                  ondelete(s.session_id);
+                }
+              }}
+            >
+              <svg
+                width="14"
+                height="14"
+                viewBox="0 0 24 24"
+                fill="none"
+                stroke="currentColor"
+                stroke-width="2"
+                stroke-linecap="round"
+              >
+                <polyline points="3 6 5 6 21 6"></polyline>
+                <path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"></path>
+                <path d="M10 11v6"></path>
+                <path d="M14 11v6"></path>
+                <path d="M9 6V4a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v2"></path>
+              </svg>
+            </span>
           </button>
         {/each}
       {/if}
@@ -277,6 +317,34 @@
     color: var(--text-primary);
     font-size: 13px;
     outline: none;
+  }
+
+  .btn-delete {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 28px;
+    height: 28px;
+    border: none;
+    border-radius: 6px;
+    background: transparent;
+    color: var(--text-muted);
+    cursor: pointer;
+    opacity: 0;
+    transition:
+      opacity 0.15s,
+      color 0.15s,
+      background 0.15s;
+    flex-shrink: 0;
+  }
+
+  .session-item:hover .btn-delete {
+    opacity: 1;
+  }
+
+  .btn-delete:hover {
+    color: var(--danger);
+    background: rgba(239, 68, 68, 0.1);
   }
 
   .session-time {

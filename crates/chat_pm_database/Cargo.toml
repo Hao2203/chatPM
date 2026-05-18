@@ -8,3 +8,4 @@ chat_pm_session = { workspace = true }
 chrono = { workspace = true }
 rusqlite = { workspace = true }
 serde = { workspace = true }
+thiserror = { workspace = true }

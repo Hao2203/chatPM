@@ -82,6 +82,7 @@
   .messages {
     flex: 1;
     overflow-y: auto;
+    overflow-x: hidden;
     padding: 20px 0 0;
     display: flex;
     flex-direction: column;
@@ -137,6 +138,8 @@
     line-height: 1.7;
     font-size: 15px;
     color: var(--text-primary);
+    overflow-wrap: break-word;
+    word-break: break-word;
   }
 
   .cursor {

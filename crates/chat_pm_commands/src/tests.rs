@@ -23,10 +23,10 @@ async fn demo() -> Result<()> {
     let pipeline = ChatPipeline::with_default_deepseek(db, config)?;
 
     // ── 1. 创建会话 → NewSession ──────────────────────────────────
-    let new_session = pipeline.create_session();
+    let mut new_session = Some(pipeline.create_session()?);
     println!(
         "会话已创建，session_id = {}",
-        new_session.session_id
+        new_session.as_ref().unwrap().session_id
     );
 
     // ── 2. 首轮：NewSession → TitlePrompt → Session → chat ──────
@@ -47,7 +47,7 @@ async fn demo() -> Result<()> {
 
         let s = if i == 0 {
             // 首轮：NewSession → TitlePrompt → finalize → Session
-            let tp = new_session.clone().into_title_prompt(user_text.to_string());
+            let tp = new_session.take().unwrap().into_title_prompt(user_text.to_string());
             let s = pipeline.finalize_session(tp).await?;
             println!("标题已生成：{}", s.title);
             s

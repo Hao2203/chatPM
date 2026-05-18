@@ -2,5 +2,8 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 fn main() {
-    chatpm_lib::run()
+    if let Err(e) = chatpm_lib::run() {
+        eprintln!("应用启动失败: {e}");
+        std::process::exit(1);
+    }
 }

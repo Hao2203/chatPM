@@ -1,12 +1,11 @@
-use anyhow::{Context as _, Result, anyhow};
-use chat_pm_session::{chat::StopReason, message::ChatMessage};
+use chat_pm_session::{ChatError, chat::StopReason, message::ChatMessage};
 use futures_lite::StreamExt;
 use reqwest::header::{AUTHORIZATION, CONTENT_TYPE};
 use serde::Deserialize;
 use serde_json::json;
 use tokio::sync::mpsc;
 
-use crate::{ApiKey, config::ReasoningEffort};
+use crate::{ApiError, ApiKey, config::ReasoningEffort};
 
 #[derive(Debug, Clone)]
 pub struct ChatRequestConfig {
@@ -39,9 +38,10 @@ impl Client {
         }
     }
 
-    pub fn from_env() -> Result<Self> {
-        let api_key = std::env::var("DEEPSEEK_API_KEY").context("missing DEEPSEEK_API_KEY")?;
-        let api_key = ApiKey::new(api_key).ok_or_else(|| anyhow!("invalid DEEPSEEK_API_KEY"))?;
+    pub fn from_env() -> Result<Self, ChatError> {
+        let api_key = std::env::var("DEEPSEEK_API_KEY")
+            .map_err(|_| ChatError::ApiKeyNotConfigured)?;
+        let api_key = ApiKey::new(api_key).ok_or(ChatError::InvalidApiKey)?;
         Ok(Self::new(api_key))
     }
 
@@ -50,7 +50,7 @@ impl Client {
         &self,
         request: &ChatRequestConfig,
         messages: &[ChatMessage],
-    ) -> Result<String> {
+    ) -> Result<String, ApiError> {
         let req_messages: Vec<_> = messages
             .iter()
             .map(|m| {
@@ -85,18 +85,18 @@ impl Client {
             .json(&body)
             .send()
             .await
-            .context("chat completion request failed")?
+            .map_err(|e| ApiError::RequestFailed(e.to_string()))?
             .error_for_status()
-            .context("chat completion returned error status")?
+            .map_err(|e| ApiError::ErrorStatus(e.to_string()))?
             .json()
             .await
-            .context("failed to parse chat completion response")?;
+            .map_err(|e| ApiError::ParseFailed(e.to_string()))?;
 
         let choice = resp
             .choices
             .into_iter()
             .next()
-            .context("模型未返回 choice")?;
+            .ok_or(ApiError::NoChoice)?;
 
         Ok(choice.message.content)
     }
@@ -105,7 +105,7 @@ impl Client {
         &self,
         request: &ChatRequestConfig,
         messages: &[ChatMessage],
-    ) -> Result<mpsc::Receiver<Result<ChatChunk>>> {
+    ) -> Result<mpsc::Receiver<Result<ChatChunk, ApiError>>, ApiError> {
         let req_messages: Vec<_> = messages
             .iter()
             .map(|m| {
@@ -140,9 +140,9 @@ impl Client {
             .json(&body)
             .send()
             .await
-            .context("chat completion request failed")?
+            .map_err(|e| ApiError::RequestFailed(e.to_string()))?
             .error_for_status()
-            .context("chat completion returned error status")?;
+            .map_err(|e| ApiError::ErrorStatus(e.to_string()))?;
 
         let (tx, rx) = mpsc::channel(32);
         tokio::spawn(async move {
@@ -153,7 +153,7 @@ impl Client {
                 let bytes = match item {
                     Ok(b) => b,
                     Err(e) => {
-                        let _ = tx.send(Err(anyhow!(e))).await;
+                        let _ = tx.send(Err(ApiError::RequestFailed(e.to_string()))).await;
                         return;
                     }
                 };
@@ -173,15 +173,15 @@ impl Client {
                         return;
                     }
 
-                    let parsed: Result<ChatStreamResponse> =
-                        serde_json::from_str(data).context("invalid stream json");
+                    let parsed: Result<ChatStreamResponse, _> =
+                        serde_json::from_str(data).map_err(|e| ApiError::ParseFailed(e.to_string()));
 
                     let frame = parsed.and_then(|resp| {
                         let choice = resp
                             .choices
                             .into_iter()
                             .next()
-                            .context("模型未返回 choice")?;
+                            .ok_or(ApiError::NoChoice)?;
 
                         let mut raw_text = String::new();
                         if let Some(reasoning) = choice.delta.reasoning_content {

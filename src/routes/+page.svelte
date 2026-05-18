@@ -5,6 +5,7 @@
   import MessageList from "$lib/components/MessageList.svelte";
   import ChatInput from "$lib/components/ChatInput.svelte";
   import SettingsModal from "$lib/components/SettingsModal.svelte";
+  import ConfirmDialog from "$lib/components/ConfirmDialog.svelte";
 
   // ── Types ──────────────────────────────────────────────────
   interface Message {
@@ -34,6 +35,14 @@
   let inputText = $state("");
   let messageId = $state(0);
   let sending = $state(false);
+  let sessionToDelete = $state<string | null>(null);
+
+  // 提取错误消息（兼容 AppError { kind, message } 和字符串）
+  function getErrorMessage(e: any): string {
+    if (typeof e === "string") return e;
+    if (e?.message) return e.message;
+    return String(e);
+  }
 
   // Per-chat draft storage
   let drafts = $state<Record<string, string>>({});
@@ -61,6 +70,27 @@
   // ── Load sessions ──────────────────────────────────────────
   async function loadSessions() {
     sessions = await invoke<SessionInfo[]>("list_sessions");
+  }
+
+  // ── Delete session ──────────────────────────────────────────
+  async function confirmDeleteSession() {
+    const sid = sessionToDelete;
+    if (!sid) return;
+    sessionToDelete = null;
+    try {
+      await invoke("delete_session", { sessionId: sid });
+      if (activeSessionId === sid) {
+        activeSessionId = null;
+        pendingNewChat = false;
+        messages = [];
+        messageId = 0;
+        const { [sid]: _, ...rest } = drafts;
+        drafts = rest;
+      }
+      await loadSessions();
+    } catch (e: any) {
+      alert("删除失败：" + getErrorMessage(e));
+    }
   }
 
   // ── Update session title ───────────────────────────────────
@@ -124,7 +154,7 @@
       showSettings = false;
       await loadSessions();
     } catch (e: any) {
-      alert("API Key 配置失败：" + e);
+      alert("API Key 配置失败：" + getErrorMessage(e));
     } finally {
       loading = false;
     }
@@ -206,7 +236,7 @@
     } catch (e: any) {
       const msg = messages.find((m) => m.id === assistantMid);
       if (msg) {
-        msg.content = "错误：" + e;
+        msg.content = "错误：" + getErrorMessage(e);
         msg.streaming = false;
         messages = [...messages];
       }
@@ -240,8 +270,29 @@
     let unlistenTitle: UnlistenFn | null = null;
     setupTitleListener().then((fn) => (unlistenTitle = fn));
 
+    // Listen for session deletions
+    const setupDeleteListener = async () => {
+      const unlisten = await listen<{ session_id: string }>(
+        "session-deleted",
+        (event) => {
+          const sid = event.payload.session_id;
+          if (activeSessionId === sid) {
+            activeSessionId = null;
+            pendingNewChat = false;
+            messages = [];
+            messageId = 0;
+          }
+          sessions = sessions.filter((s) => s.session_id !== sid);
+        },
+      );
+      return unlisten;
+    };
+    let unlistenDelete: UnlistenFn | null = null;
+    setupDeleteListener().then((fn) => (unlistenDelete = fn));
+
     return () => {
       if (unlistenTitle) unlistenTitle();
+      if (unlistenDelete) unlistenDelete();
     };
   });
 </script>
@@ -254,6 +305,7 @@
     oncreate={startNewChat}
     onselect={selectSession}
     onupdatetitle={updateSessionTitle}
+    ondelete={(sid) => (sessionToDelete = sid)}
     onsettings={() => (showSettings = true)}
   />
 
@@ -345,6 +397,17 @@
   onsave={configureApiKey}
 />
 
+<ConfirmDialog
+  show={sessionToDelete !== null}
+  title="删除会话"
+  message="确定要删除这个会话吗？此操作无法撤销。"
+  confirmText="删除"
+  cancelText="取消"
+  danger={true}
+  onconfirm={confirmDeleteSession}
+  oncancel={() => (sessionToDelete = null)}
+/>
+
 <style>
   /* ── CSS Variables (ChatGPT dark theme) ────────────────── */
   :global(body) {
@@ -401,6 +464,7 @@
     flex-direction: column;
     position: relative;
     min-width: 0;
+    overflow-x: hidden;
   }
 
   .btn-toggle-sidebar {
@@ -549,6 +613,7 @@
       border: 1px solid var(--border-color);
       border-radius: var(--radius);
       overflow-x: auto;
+      max-width: 100%;
     }
 
     .markdown-body pre code {
@@ -558,6 +623,8 @@
       font-size: 0.85em;
       line-height: 1.6;
       color: #cdd6f4;
+      white-space: pre;
+      word-break: normal;
     }
 
     .markdown-body blockquote {
@@ -577,7 +644,10 @@
       margin: 0.8em 0;
       border-collapse: collapse;
       width: 100%;
+      max-width: 100%;
       font-size: 0.9em;
+      display: block;
+      overflow-x: auto;
     }
 
     .markdown-body th,

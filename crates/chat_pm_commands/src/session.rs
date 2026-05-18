@@ -1,16 +1,31 @@
-use anyhow::{Result, anyhow};
-use chat_pm_database::MemoryDb;
-use chat_pm_deepseek::{ChatRequestConfig, Client as DeepseekClient, ReasoningEffort};
+use anyhow::Result as AnyhowResult;
+use chat_pm_database::{DbError, MemoryDb};
+use chat_pm_deepseek::{ApiError, ChatRequestConfig, Client as DeepseekClient, ReasoningEffort};
 use tokio::sync::mpsc;
 use tracing::{debug, info};
 
 use chat_pm_session::{
+    ChatError,
     chat::{MessageFrame, ReplyReceiver, StopReason},
     context::Context,
     message::UserInput,
     prompt::{PromptComposer, SystemPrompt, TitlePrompt},
     session::{NewSession, Session, SessionId, Title},
 };
+
+// ── PipelineError ───────────────────────────────────────────────────
+
+#[derive(Debug, thiserror::Error)]
+pub enum PipelineError {
+    #[error("{0}")]
+    Domain(#[from] ChatError),
+    #[error("{0}")]
+    Db(#[from] DbError),
+    #[error("{0}")]
+    Api(#[from] ApiError),
+    #[error("{0}")]
+    Internal(#[from] anyhow::Error),
+}
 
 #[derive(Debug, Clone)]
 pub struct PipelineConfig {
@@ -25,19 +40,19 @@ pub struct PipelineConfig {
 }
 
 impl PipelineConfig {
-    pub fn validate(&self) -> Result<()> {
+    pub fn validate(&self) -> AnyhowResult<()> {
         if self.reply_token_limit == 0 {
-            return Err(anyhow!("reply_token_limit must be > 0"));
+            return Err(anyhow::anyhow!("reply_token_limit must be > 0"));
         }
         Ok(())
     }
 
-    pub fn set_reasoning_effort_from_str(&mut self, value: &str) -> Result<()> {
+    pub fn set_reasoning_effort_from_str(&mut self, value: &str) -> AnyhowResult<()> {
         self.reasoning_effort = Some(ReasoningEffort::parse(value)?);
         Ok(())
     }
 
-    pub fn load_from_env(mut self) -> Result<Self> {
+    pub fn load_from_env(mut self) -> AnyhowResult<Self> {
         if let Ok(value) = std::env::var("CHAT_PM_REASONING_EFFORT") {
             self.set_reasoning_effort_from_str(&value)?;
         }
@@ -90,12 +105,12 @@ pub struct ChatPipeline {
 }
 
 impl ChatPipeline {
-    pub fn new(db: MemoryDb, client: DeepseekClient, config: PipelineConfig) -> Result<Self> {
+    pub fn new(db: MemoryDb, client: DeepseekClient, config: PipelineConfig) -> Result<Self, PipelineError> {
         config.validate()?;
         Ok(Self { client, db, config })
     }
 
-    pub fn with_default_deepseek(db: MemoryDb, config: PipelineConfig) -> Result<Self> {
+    pub fn with_default_deepseek(db: MemoryDb, config: PipelineConfig) -> Result<Self, PipelineError> {
         let client = DeepseekClient::from_env()?;
         Self::new(db, client, config)
     }
@@ -105,11 +120,11 @@ impl ChatPipeline {
     /// 创建新会话 → `NewSession`。
     ///
     /// 数据库记录已写入，但标题尚未生成。
-    pub fn create_session(&self) -> NewSession {
+    pub fn create_session(&self) -> Result<NewSession, PipelineError> {
         let session_id = SessionId::new();
-        self.db.create_session(&session_id.to_string());
+        self.db.create_session(&session_id.to_string())?;
         info!(%session_id, "新会话已创建");
-        NewSession { session_id }
+        Ok(NewSession { session_id })
     }
 
     // ── Lifecycle: TitlePrompt → Session ────────────────────────────
@@ -117,7 +132,7 @@ impl ChatPipeline {
     /// `TitlePrompt` → `Session`：调用 LLM 生成标题，持久化后转入正式会话。
     ///
     /// 消耗 `TitlePrompt`，确保标题生成只发生一次。
-    pub async fn finalize_session(&self, tp: TitlePrompt) -> Result<Session> {
+    pub async fn finalize_session(&self, tp: TitlePrompt) -> Result<Session, PipelineError> {
         let session_id = tp.session_id();
         let messages = tp.compose();
 
@@ -128,22 +143,32 @@ impl ChatPipeline {
 
         let title = clean_title(&raw_title);
         let sid = session_id.to_string();
-        self.db.set_session_title(&sid, title.as_str());
+        self.db.set_session_title(&sid, title.as_str())?;
         info!(session_id = %sid, %title, "会话标题已生成");
         Ok(Session { session_id, title })
     }
 
     /// 从持久化记录恢复 `Session`（仅限已有标题的会话）。
-    pub fn resume_session(&self, session_id: SessionId) -> Result<Session> {
+    pub fn resume_session(&self, session_id: SessionId) -> Result<Session, PipelineError> {
         let sid = session_id.to_string();
         let record = self
             .db
-            .get_session(&sid)
-            .ok_or_else(|| anyhow!("session '{sid}' 不存在"))?;
+            .get_session(&sid)?
+            .ok_or(ChatError::SessionNotFound(sid.clone()))?;
         let title = record
             .title
-            .ok_or_else(|| anyhow!("session '{sid}' 尚未生成标题，无法恢复"))?;
+            .ok_or(ChatError::TitleNotGenerated(sid))?;
         Ok(Session::resume(session_id, Title::new(title)))
+    }
+
+    /// 删除会话及其所有聊天记录。
+    pub fn delete_session(&self, session_id: SessionId) -> Result<bool, PipelineError> {
+        let sid = session_id.to_string();
+        let deleted = self.db.delete_session(&sid)?;
+        if deleted {
+            info!(%sid, "会话已删除");
+        }
+        Ok(deleted)
     }
 
     // ── Chat on Session ─────────────────────────────────────────────
@@ -155,13 +180,13 @@ impl ChatPipeline {
         &self,
         session: &Session,
         user_input: UserInput,
-    ) -> Result<mpsc::Receiver<Result<MessageFrame>>> {
+    ) -> Result<mpsc::Receiver<Result<MessageFrame, ApiError>>, PipelineError> {
         let sid = session.session_id.to_string();
         info!(%sid, "开始处理");
 
         let recent_memory = self
             .db
-            .load_recent_memory(&sid, self.config.short_term_turns);
+            .load_recent_memory(&sid, self.config.short_term_turns)?;
         debug!(count = recent_memory.len(), "短期记忆加载完成");
 
         let system_prompt = SystemPrompt {
@@ -213,14 +238,17 @@ impl ChatPipeline {
             }
 
             let answer = receiver.finish(stop_reason_result, completion_tokens_result);
-            db.append_chat_turn(&sid, user_input.into(), answer.display_text.clone());
+            if let Err(e) = db.append_chat_turn(&sid, user_input.into(), answer.display_text.clone()) {
+                tracing::error!(%sid, error = %e, "保存聊天记录失败");
+            }
 
-            let stats = db.stats();
-            info!(
-                sessions = stats.session_count,
-                total_turns = stats.total_turn_count,
-                "记忆写回完成"
-            );
+            if let Ok(stats) = db.stats() {
+                info!(
+                    sessions = stats.session_count,
+                    total_turns = stats.total_turn_count,
+                    "记忆写回完成"
+                );
+            }
         });
 
         Ok(rx)

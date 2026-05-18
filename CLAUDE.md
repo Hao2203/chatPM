@@ -1,63 +1,67 @@
-# chatPM Project Skill
+# chatPM 项目技能
 
-## Overview
+## 语言要求
 
-chatPM is a local-first chat application with future end-to-end encrypted sync support. All chat records are stored locally in SQLite. The tech stack is **Rust workspace** (core logic + Tauri backend) + **Tauri 2.x** (desktop shell) + **SvelteKit 5** (UI, SPA mode).
+**Agent 必须使用中文回复用户。** 代码注释和提交信息建议用中文。
 
----
+## 概述
 
-## Architecture
-
-### Workspace Crates (Rust)
-
-| Crate | Purpose | Async? |
-|---|---|---|
-| `chat_pm_session` | Core domain types & pure functions | **No** (sync-only) |
-| `chat_pm_database` | SQLite storage via `rusqlite` (`bundled`) | No |
-| `chat_pm_deepseek` | DeepSeek API streaming client | Yes (tokio) |
-| `chat_pm_commands` | Business logic pipeline, session orchestration | Yes (tokio) |
-| `src-tauri` (chatpm) | Tauri app binary, Tauri commands, app state | Yes |
-
-### Dependency Hierarchy
-
-```
-chat_pm_session          ← zero internal deps (only derive_more, uuid)
-    ↑
-chat_pm_database         ← + rusqlite (bundled), chrono, serde
-chat_pm_deepseek         ← + reqwest, secrecy, tokio
-    ↑
-chat_pm_commands         ← depends on all three above, + uuid, tracing
-    ↑
-src-tauri (chatpm)       ← depends on all crates, + tauri, tokio, uuid
-```
+chatPM 是一个本地优先的聊天应用，未来将支持端到端加密同步。所有聊天记录本地存储在 SQLite 中。技术栈为 **Rust workspace**（核心逻辑 + Tauri 后端）+ **Tauri 2.x**（桌面壳）+ **SvelteKit 5**（UI，SPA 模式）。前端使用 **bun** 作为包管理器和运行时。
 
 ---
 
-## `chat_pm_session` — Core Domain (Sync Only)
+## 架构
 
-**Rule:** This crate MUST NOT contain any async functions, tokio, or I/O. It defines pure data types and transformations.
+### Workspace Crates（Rust）
 
-### Key Types
+| Crate | 用途 | 异步？ | 错误类型 |
+|---|---|---|---|
+| `chat_pm_session` | 核心领域类型和纯函数 | **否**（仅同步） | `ChatError` |
+| `chat_pm_database` | 通过 `rusqlite`（`bundled`）存储 SQLite | 否 | `DbError` |
+| `chat_pm_deepseek` | DeepSeek API 流式客户端 | 是（tokio） | `ApiError` |
+| `chat_pm_commands` | 业务逻辑管道、会话编排 | 是（tokio） | `PipelineError` |
+| `src-tauri`（chatpm） | Tauri 应用二进制、Tauri 命令、应用状态 | 是 | `AppError` |
 
-| File | Types | Notes |
+### 依赖层次
+
+```
+chat_pm_session          ← 零内部依赖（仅 derive_more、uuid）
+    ↑
+chat_pm_database         ← + rusqlite（bundled）、chrono、serde
+chat_pm_deepseek         ← + reqwest、secrecy、tokio
+    ↑
+chat_pm_commands         ← 依赖以上三个，+ uuid、tracing
+    ↑
+src-tauri（chatpm）       ← 依赖所有 crate，+ tauri、tokio、uuid
+```
+
+---
+
+## `chat_pm_session` — 核心领域（仅同步）
+
+**规则：** 此 crate 不得包含任何 async 函数、tokio 或 I/O。它定义纯数据类型和转换。
+
+### 关键类型
+
+| 文件 | 类型 | 说明 |
 |---|---|---|
-| `chat.rs` | `TurnId(u64)`, `Role`(System/User/Assistant), `StopReason`, `MessageFrame`, `ReplyReceiver`, `FinalAnswer`, `MemoryUpdatePlan` | Streaming reply assembly |
-| `message.rs` | `UserInput`, `ChatMessage` | `UserInput::new()` normalizes whitespace |
-| `memory.rs` | `Memory { user_text, assistant_text }` | One turn pair |
-| `context.rs` | `Context { summary: Option<Summary>, recent_memory: Vec<Memory> }` | Assembled before prompt composition |
-| `summary.rs` | `Summary { content, last_turn_id }` | Conversation summary for long contexts |
-| `language.rs` | `Language` enum (~30 variants), `SUPPORTED_LANGUAGES` | Each variant has a `code()` → BCP-47 string |
-| `prompt.rs` | `SystemPrompt`, `PromptComposer`, `TitlePrompt` | `TitlePrompt` carries `SessionId` + user input; `compose()` → `Vec<ChatMessage>` |
-| `session.rs` | `SessionId(Uuid)`, `Title(String)`, `NewSession`, `Session` | Newtype wrappers + lifecycle states |
+| `chat.rs` | `TurnId(u64)`、`Role`(System/User/Assistant)、`StopReason`、`MessageFrame`、`ReplyReceiver`、`FinalAnswer`、`MemoryUpdatePlan` | 流式回复组装 |
+| `message.rs` | `UserInput`、`ChatMessage` | `UserInput::new()` 规范化空白字符 |
+| `memory.rs` | `Memory { user_text, assistant_text }` | 一对轮次 |
+| `context.rs` | `Context { summary: Option<Summary>, recent_memory: Vec<Memory> }` | 在提示词组装前构建 |
+| `summary.rs` | `Summary { content, last_turn_id }` | 长对话的对话摘要 |
+| `language.rs` | `Language` 枚举（约 30 个变体）、`SUPPORTED_LANGUAGES` | 每个变体有 `code()` → BCP-47 字符串 |
+| `prompt.rs` | `SystemPrompt`、`PromptComposer`、`TitlePrompt` | `TitlePrompt` 携带 `SessionId` + 用户输入；`compose()` → `Vec<ChatMessage>` |
+| `session.rs` | `SessionId(Uuid)`、`Title(String)`、`NewSession`、`Session` | Newtype 封装 + 生命周期状态 |
 
-### Prompt Composition Flow (`PromptComposer::compose_prompt`)
+### 提示词组装流程（`PromptComposer::compose_prompt`）
 
-1. If no recent memory → prepend `SystemPrompt` as first message
-2. If summary exists → prepend `"Summary: {content}"` as system message
-3. Interleave memory pairs: assistant msg → user msg (oldest first)
-4. Append current `UserInput` as final user message
+1. 如果没有近期记忆 → 将 `SystemPrompt` 作为第一条消息
+2. 如果存在摘要 → 将 `"Summary: {content}"` 作为系统消息插入
+3. 交替插入记忆对：助手消息 → 用户消息（最旧的在前）
+4. 将当前 `UserInput` 追加为最后一条用户消息
 
-### Title Generation Flow (Type-Driven State Machine)
+### 标题生成流程（类型驱动的状态机）
 
 ```
 NewSession { session_id: SessionId }
@@ -81,31 +85,31 @@ NewSession { session_id: SessionId }
 - `finalize_session(TitlePrompt)` 消耗 `TitlePrompt`，标题生成仅一次
 - 恢复已有标题的会话：`pipeline.resume_session(SessionId) → Result<Session>`
 
-### Domain Newtype Pattern
+### 领域 Newtype 模式
 
 核心层对所有外部标识符使用 newtype 封装，杜绝裸 `String` / `Uuid`：
 
 | Newtype | 内部类型 | 关键 trait |
 |---|---|---|
-| `SessionId` | `Uuid` | `Copy`, `Display`, `Hash` |
-| `Title` | `String` | `Display`, `as_str()`, `into_inner()` |
-| `UserInput` | `String` | `Display`, `Into<String>` |
+| `SessionId` | `Uuid` | `Copy`、`Display`、`Hash` |
+| `Title` | `String` | `Display`、`as_str()`、`into_inner()` |
+| `UserInput` | `String` | `Display`、`Into<String>` |
 
 ---
 
-## `chat_pm_database` — SQLite Storage
+## `chat_pm_database` — SQLite 存储
 
-### Implementation
+### 实现
 
-Uses `rusqlite` with `bundled` feature (SQLite compiled into binary). Thread-safe via `Arc<Mutex<Connection>>`.
+使用 `rusqlite` 配合 `bundled` 特性（SQLite 编译进二进制文件）。通过 `Arc<Mutex<Connection>>` 实现线程安全。
 
-### Schema
+### 数据库模式
 
 ```sql
 CREATE TABLE sessions (
     session_id  TEXT PRIMARY KEY,
     created_at  TEXT NOT NULL,   -- RFC 3339
-    title       TEXT,            -- AI-generated or user-set
+    title       TEXT,            -- AI 生成或用户设置
     user_persona TEXT
 );
 
@@ -126,69 +130,69 @@ CREATE TABLE config (
 );
 ```
 
-Configured with `PRAGMA journal_mode=WAL; PRAGMA foreign_keys=ON;`.
+配置了 `PRAGMA journal_mode=WAL; PRAGMA foreign_keys=ON;`。
 
-### Key Methods
+### 关键方法
 
-| Method | Description |
+| 方法 | 说明 |
 |---|---|
-| `MemoryDb::open(path)` | Open/create persistent SQLite file |
-| `MemoryDb::open_in_memory()` | Open in-memory DB (tests) |
-| `create_session(session_id)` | Insert new session |
-| `session_exists(session_id) -> bool` | Check existence |
-| `get_session(session_id) -> Option<SessionRecord>` | Fetch full record (includes title) |
-| `set_session_title(session_id, title)` | Update session title |
-| `get_session_title(session_id) -> Option<String>` | Read title |
-| `list_sessions() -> Vec<SessionRecord>` | All sessions, newest first |
-| `append_chat_turn(session_id, user_text, assistant_text)` | Insert one turn pair |
-| `recent_turns(session_id, n) -> Vec<TurnRecord>` | Last N turns (chronological) |
-| `load_recent_memory(session_id, n) -> Vec<Memory>` | Last N turns as Memory pairs |
+| `MemoryDb::open(path)` | 打开/创建持久化 SQLite 文件 |
+| `MemoryDb::open_in_memory()` | 打开内存数据库（测试用） |
+| `create_session(session_id)` | 插入新会话 |
+| `session_exists(session_id) -> bool` | 检查是否存在 |
+| `get_session(session_id) -> Option<SessionRecord>` | 获取完整记录（含标题） |
+| `set_session_title(session_id, title)` | 更新会话标题 |
+| `get_session_title(session_id) -> Option<String>` | 读取标题 |
+| `list_sessions() -> Vec<SessionRecord>` | 所有会话，最新的在前 |
+| `append_chat_turn(session_id, user_text, assistant_text)` | 插入一对轮次 |
+| `recent_turns(session_id, n) -> Vec<TurnRecord>` | 最近 N 轮（按时间顺序） |
+| `load_recent_memory(session_id, n) -> Vec<Memory>` | 最近 N 轮作为 Memory 对 |
 | `next_turn_id(session_id) -> TurnId` | `MAX(turn_num) + 1` |
-| `stats() -> DbStats` | Session & turn counts |
+| `stats() -> DbStats` | 会话和轮次计数 |
 
-### Key Types
+### 关键类型
 
-- `SessionRecord { session_id, created_at, title, user_persona }` — Serialize/Deserialize
+- `SessionRecord { session_id, created_at, title, user_persona }` — 可序列化/反序列化
 - `TurnRecord { turn_id, session_id, user_text, assistant_text, created_at }` — `to_memory_chunk() -> Memory`
 
-### Utility
+### 工具函数
 
-`cosine_similarity(a: &[f32], b: &[f32]) -> f32` — pure Rust, for future vector/RAG search.
+`cosine_similarity(a: &[f32], b: &[f32]) -> f32` — 纯 Rust 实现，用于未来的向量/RAG 搜索。
 
 ---
 
-## `chat_pm_deepseek` — API Client
+## `chat_pm_deepseek` — API 客户端
 
-### Key Types
+### 关键类型
 
-- `ApiKey(SecretString)` — validates chars, wraps in `secrecy::SecretString`
-- `Client { http, api_base, api_key }` — defaults to `https://api.deepseek.com`
+- `ApiKey(SecretString)` — 验证字符，封装在 `secrecy::SecretString` 中
+- `Client { http, api_base, api_key }` — 默认使用 `https://api.deepseek.com`
 - `ChatRequestConfig { model, max_tokens, thinking_enabled, reasoning_effort }`
 - `ChatChunk { raw_text, completion_tokens, stop_reason }`
 - `ReasoningEffort` — `High` | `Max`
 
-### Streaming Flow
+### 流式处理流程
 
-`Client::stream_chat()` → POST to `/chat/completions` with `stream: true` → parse SSE `data:` lines → `mpsc::Receiver<Result<ChatChunk>>`
+`Client::stream_chat()` → POST 到 `/chat/completions`，`stream: true` → 解析 SSE `data:` 行 → `mpsc::Receiver<Result<ChatChunk>>`
 
-Stop reasons: `"length"` → `MaxTokens`, `"content_filter"` → `ContentFilter`, other → `EndOfSequence`
+停止原因：`"length"` → `MaxTokens`，`"content_filter"` → `ContentFilter`，其他 → `EndOfSequence`
 
 ---
 
-## `chat_pm_commands` — Business Logic
+## `chat_pm_commands` — 业务逻辑
 
 ### `ChatPipeline`
 
-Orchestrates the full flow with type-driven session lifecycle:
+通过类型驱动的会话生命周期编排完整流程：
 
-| Method | Signature | Notes |
+| 方法 | 签名 | 说明 |
 |---|---|---|
-| `create_session` | `() → NewSession` | DB record created, no title yet |
-| `finalize_session` | `(TitlePrompt) → Result<Session>` | Calls LLM, persists title, **consumes** `TitlePrompt` |
-| `resume_session` | `(SessionId) → Result<Session>` | Only succeeds if title exists in DB |
-| `chat` | `(&Session, UserInput) → Result<Receiver<Result<MessageFrame>>>` | Type system ensures only titled sessions can chat |
+| `create_session` | `() → NewSession` | 创建 DB 记录，暂无标题 |
+| `finalize_session` | `(TitlePrompt) → Result<Session>` | 调用 LLM，持久化标题，**消耗** `TitlePrompt` |
+| `resume_session` | `(SessionId) → Result<Session>` | 仅在 DB 中存在标题时成功 |
+| `chat` | `(&Session, UserInput) → Result<Receiver<Result<MessageFrame>>>` | 类型系统确保只有有标题的会话才能对话 |
 
-**State machine flow (first turn):**
+**状态机流程（首轮）：**
 ```
 create_session() → NewSession
     → new_session.into_title_prompt(user_input) → TitlePrompt
@@ -196,103 +200,209 @@ create_session() → NewSession
     → pipeline.chat(&session, user_input)
 ```
 
-**Subsequent turns:** `resume_session(id) → Session` → `chat(&session, input)`
+**后续轮次：** `resume_session(id) → Session` → `chat(&session, input)`
 
-### `PipelineConfig` (Default)
+### `PipelineConfig`（默认值）
 
-| Field | Default |
+| 字段 | 默认值 |
 |---|---|
 | `chat_model` | `"deepseek-v4-flash"` |
 | `token_limit` | 8192 |
 | `reply_token_limit` | 2048 |
 | `short_term_turns` | 6 |
 | `long_term_top_k` | 4 |
-| `system_role` | Chinese assistant prompt |
+| `system_role` | 中文助手提示词 |
 | `thinking_enabled` | false |
 | `reasoning_effort` | None |
 
-Env override: `CHAT_PM_REASONING_EFFORT`
+环境变量覆盖：`CHAT_PM_REASONING_EFFORT`
 
 ---
 
-## Tauri Integration (`src-tauri`)
+## Tauri 集成（`src-tauri`）
 
 ### AppState
 
 ```rust
 struct AppState {
-    db: MemoryDb,                          // persistent SQLite
-    pipeline: Mutex<Option<ChatPipeline>>,  // initialized after API key set
+    db: MemoryDb,                          // 持久化 SQLite
+    pipeline: Mutex<Option<ChatPipeline>>,  // 设置 API key 后初始化
 }
 ```
 
-Database is stored in Tauri's app data directory (`$DATA_DIR/chatpm.db`).
+数据库存储在 Tauri 的应用数据目录中（`$DATA_DIR/chatpm.db`）。
 
-### Configuration Persistence
+### 配置持久化
 
-API key is stored in the `config` table of the SQLite database (`key="api_key"`). On startup, `setup()` attempts to load and validate the stored key, auto-initializing the pipeline if valid.
+API key 存储在 SQLite 数据库的 `config` 表中（`key="api_key"`）。启动时，`setup()` 尝试加载并验证已存储的 key，如果有效则自动初始化 pipeline。
 
-### Tauri Commands
+### Tauri 命令
 
-| Command | Input | Output | Notes |
+| 命令 | 输入 | 输出 | 说明 |
 |---|---|---|---|
-| `check_api_key` | — | `bool` | Whether pipeline is ready |
-| `create_session` | — | `String` (session_id) | Creates `NewSession` in DB, returns UUID |
-| `set_api_key` | `api_key: String` | `()` | Validates, stores to DB, inits pipeline |
-| `send_message` | `session_id, content` | `()` | State machine: `NewSession`→`TitlePrompt`→`Session` on first turn |
-| `list_sessions` | — | `Vec<SessionInfo>` | All sessions, newest first |
-| `get_turns` | `session_id` | `Vec<TurnInfo>` | All turns for session |
-| `update_session_title` | `session_id, title` | `()` | Manual title edit, emits event |
+| `check_api_key` | — | `bool` | pipeline 是否就绪 |
+| `create_session` | — | `String`（session_id） | 在 DB 中创建 `NewSession`，返回 UUID |
+| `set_api_key` | `api_key: String` | `()` | 验证、存储到 DB、初始化 pipeline |
+| `send_message` | `session_id, content` | `()` | 状态机：首轮 `NewSession`→`TitlePrompt`→`Session` |
+| `list_sessions` | — | `Vec<SessionInfo>` | 所有会话，最新的在前 |
+| `get_turns` | `session_id` | `Vec<TurnInfo>` | 会话的所有轮次 |
+| `update_session_title` | `session_id, title` | `()` | 手动编辑标题，发出事件 |
 
-### Event-Based Streaming
+### 基于事件的流式传输
 
-`send_message` spawns a tokio task that emits:
-- `chat-chunk` → `{ session_id, content }` — each text chunk
-- `chat-done` → `{ session_id }` — stream finished, turn stored in DB
-- `session-title-updated` → `{ session_id, title }` — emitted on first-turn title generation and manual title edits
+`send_message` 创建一个 tokio 任务，发出：
+- `chat-chunk` → `{ session_id, content }` — 每个文本块
+- `chat-done` → `{ session_id }` — 流结束，轮次已存入 DB
+- `session-title-updated` → `{ session_id, title }` — 首轮标题生成和手动标题编辑时发出
 
-This avoids blocking the Tauri IPC channel during streaming.
+这避免了在流式传输期间阻塞 Tauri IPC 通道。
 
 ---
 
-## Frontend (Tauri + SvelteKit)
+## 前端（Tauri + SvelteKit）
 
-- **SvelteKit 5** with runes (`$state`, `$effect`, etc.)
-- **SPA mode**: `adapter-static` + `ssr = false` (no Node.js server)
-- **Tauri 2.x** with `@tauri-apps/api` v2
-- Frontend calls Rust via `invoke("command_name", { args })`
-- Listens to streaming events via `listen("chat-chunk", callback)`
+- **SvelteKit 5** 配合 runes（`$state`、`$effect` 等）
+- **SPA 模式**：`adapter-static` + `ssr = false`（无 Node.js 服务器）
+- **Tauri 2.x** 配合 `@tauri-apps/api` v2
+- 前端通过 `invoke("command_name", { args })` 调用 Rust
+- 通过 `listen("chat-chunk", callback)` 监听流式事件
 
-### UI Structure (`+page.svelte`)
+### UI 结构（`+page.svelte`）
 
 ```
 ┌──────────┬──────────────────────────────┐
-│ Sidebar  │  Chat Area                   │
+│ 侧边栏    │  聊天区域                      │
 │          │                              │
-│ Sessions │  Messages (user/assistant)   │
-│ + New    │                              │
-│ Settings │                              │
+│ 会话列表  │  消息（用户/助手）              │
+│ + 新建   │                              │
+│ 设置     │                              │
 │          ├──────────────────────────────┤
-│          │  Input Box  [Send]           │
+│          │  输入框  [发送]               │
 └──────────┴──────────────────────────────┘
 ```
 
-- **Settings panel**: modal overlay for entering DeepSeek API key
-- **Streaming**: cursor blink animation on in-progress messages
-- **Session list**: sidebar with created_at timestamps, active highlight
+- **设置面板**：用于输入 DeepSeek API key 的模态覆盖层
+- **流式传输**：进行中消息的光标闪烁动画
+- **会话列表**：侧边栏显示 created_at 时间戳，高亮当前活跃会话
 
 ---
 
-## Key Conventions
+## 关键约定
 
-### Code Style
-- Edition 2024 for all crates except `src-tauri` (edition 2021)
-- Workspace lints: `clippy::dbg_macro = "warn"`
-- Error handling: `anyhow` for application, `thiserror` (workspace dep, not yet used)
-- Logging: `tracing` with `logforth` bridge (configured in tests)
-- Date/time stored as RFC 3339 strings in SQLite
+### 代码风格
+- 所有 crate 使用 Edition 2024，`src-tauri` 除外（edition 2021）
+- Workspace lints：`clippy::dbg_macro = "warn"`
+- 日志：`tracing` 配合 `logforth` 桥接（在测试中配置）
+- 日期/时间以 RFC 3339 字符串形式存储在 SQLite 中
 
-### Data Flow
+### 错误处理
+
+**禁止使用 `unwrap()` 和 `expect()`。** 所有可能失败的操作必须通过 `Result` 传播或显式处理。
+
+**四层错误体系：**
+
+| 层级 | 错误类型 | 位置 | 用途 |
+|---|---|---|---|
+| 领域层 | `ChatError` | `chat_pm_session::error` | 违反业务逻辑约束（会话不存在、标题未生成等） |
+| 外部接口层 | `ApiError`、`DbError` | `chat_pm_deepseek::error`、`chat_pm_database` | API 调用失败、数据库操作失败 |
+| 命令层 | `PipelineError` | `chat_pm_commands::session` | 组合 Domain + Api + Db + anyhow |
+| 接口层 | `AppError` | `src-tauri::error` | Tauri 命令返回值，序列化为 `{kind, message}` |
+
+**`ChatError`（`crates/chat_pm_session/src/error.rs`）— 纯粹的业务逻辑违反：**
+
+```rust
+#[derive(Debug, Clone, thiserror::Error)]
+pub enum ChatError {
+    #[error("会话 '{0}' 不存在")]         SessionNotFound(String),
+    #[error("会话 '{0}' 尚未生成标题")]     TitleNotGenerated(String),
+    #[error("未配置 API Key")]           ApiKeyNotConfigured,
+    #[error("无效的 API Key")]           InvalidApiKey,
+}
+```
+
+- 不包含任何 I/O 或基础设施故障，只反映领域规则被打破
+- `Clone` 实现允许在调用方匹配具体变体后重试
+
+**`ApiError`（`crates/chat_pm_deepseek/src/error.rs`）— 外部 API 调用失败：**
+
+```rust
+#[derive(Debug, thiserror::Error)]
+pub enum ApiError {
+    #[error("API 请求发送失败: {0}")]     RequestFailed(String),
+    #[error("API 返回错误状态: {0}")]     ErrorStatus(String),
+    #[error("API 响应解析失败: {0}")]     ParseFailed(String),
+    #[error("模型未返回任何 choice")]     NoChoice,
+}
+```
+
+- `stream_chat()` 返回 `Result<Receiver<Result<ChatChunk, ApiError>>, ApiError>`
+- `chat_complete()` 返回 `Result<String, ApiError>`
+- `from_env()` 返回 `Result<Self, ChatError>`（API key 验证是领域规则）
+
+**`DbError`（`crates/chat_pm_database/src/lib.rs`）— 数据库操作失败：**
+
+```rust
+#[derive(Debug, thiserror::Error)]
+pub enum DbError {
+    #[error("数据库锁已污染")]    Lock,
+    #[error("SQL 错误: {0}")]    Sql(#[from] rusqlite::Error),
+    #[error("日期解析失败: {0}")]  DateParse(String),
+}
+
+pub type DbResult<T> = Result<T, DbError>;
+```
+
+- `MemoryDb` 所有公共方法返回 `DbResult<T>`
+- `lock_conn()` 私有方法封装 `Mutex::lock()`，返回 `DbResult<MutexGuard<_>>`
+
+**`PipelineError`（`crates/chat_pm_commands/src/session.rs`）— 命令层统一错误：**
+
+```rust
+#[derive(Debug, thiserror::Error)]
+pub enum PipelineError {
+    #[error("{0}")] Domain(#[from] ChatError),
+    #[error("{0}")] Db(#[from] DbError),
+    #[error("{0}")] Api(#[from] ApiError),
+    #[error("{0}")] Internal(#[from] anyhow::Error),
+}
+```
+
+- `ChatPipeline` 所有方法返回 `Result<T, PipelineError>`
+- `From` 自动转换子错误，调用方可匹配具体变体（如 `send_message` 中对 `SessionNotFound` | `TitleNotGenerated` 的特殊处理）
+
+**`AppError`（`src-tauri/src/error.rs`）— Tauri 接口序列化：**
+
+```rust
+#[derive(Debug, Clone, Serialize)]
+pub struct AppError {
+    pub kind: String,     // "db" | "api" | "validation" | "locked" | "internal"
+    pub message: String,
+}
+```
+
+- 实现 `From<ChatError>`（kind=`"validation"`）、`From<DbError>`（kind=`"db"`）、`From<ApiError>`（kind=`"api"`）、`From<PipelineError>`（按变体分发）、`From<anyhow::Error>`（kind=`"internal"`）
+- 所有 Tauri 命令返回 `Result<T, AppError>`，前端通过 `getErrorMessage(e)` 提取消息
+
+**前端错误处理：**
+
+```typescript
+function getErrorMessage(e: any): string {
+    if (typeof e === "string") return e;
+    if (e?.message) return e.message;
+    return String(e);
+}
+```
+
+**错误流转链路（send_message 示例）：**
+
+```
+[DeepSeek API] ApiError ──┐
+[SQLite]      DbError  ──┼── PipelineError ──→ AppError ──→ [Frontend] getErrorMessage(e)
+[Domain]  ChatError ───┘        ↑                    ↑
+                            ? 自动转换          From 逐变体分发
+```
+
+### 数据流
 ```
 [UI] invoke("send_message", {session_id, content})
          ↓
@@ -300,48 +410,48 @@ This avoids blocking the Tauri IPC channel during streaming.
          ↓                              ↓
 [mpsc stream] ← DeepSeek SSE       emit("chat-chunk")
          ↓                              ↓
-[ReplyReceiver] → FinalAnswer      [UI] listen() → update messages
+[ReplyReceiver] → FinalAnswer      [UI] listen() → 更新消息
          ↓
 [DB] append_chat_turn()
          ↓
 emit("chat-done")
 ```
 
-### Security
-- API keys MUST use `chat_pm_deepseek::ApiKey` (wraps `secrecy::SecretString`)
-- API key entered via UI settings, stored in-memory only (no disk persistence)
-- Never log or serialize raw API keys
-- Future: end-to-end encryption for sync (not yet implemented)
+### 安全
+- API key 必须使用 `chat_pm_deepseek::ApiKey`（封装 `secrecy::SecretString`）
+- API key 通过 UI 设置输入，仅存储在内存中（不持久化到磁盘）
+- 绝不记录或序列化原始 API key
+- 未来：同步的端到端加密（尚未实现）
 
 ---
 
-## Testing
+## 测试
 
-Test in `crates/chat_pm_commands/src/tests.rs` — integration test (`demo`):
-1. Loads `.env` for `DEEPSEEK_API_KEY`
-2. Creates `MemoryDb::open_in_memory()` + `ChatPipeline`
-3. Runs multi-turn conversation
-4. Simulates session resume across "HTTP requests"
+测试在 `crates/chat_pm_commands/src/tests.rs` 中 — 集成测试（`demo`）：
+1. 从 `.env` 加载 `DEEPSEEK_API_KEY`
+2. 创建 `MemoryDb::open_in_memory()` + `ChatPipeline`
+3. 运行多轮对话
+4. 模拟跨"HTTP 请求"的会话恢复
 
-Run: `cargo test --package chat_pm_commands`
+运行：`cargo test --package chat_pm_commands`
 
 ---
 
-## Current State
+## 当前状态
 
-**Implemented:**
-- Core domain model (`chat_pm_session`) — sync-only, no I/O, newtype pattern
-- AI-powered title generation via `TitlePrompt` + type-driven state machine
-- SQLite storage via `rusqlite` (`chat_pm_database`) — WAL mode, bundled
-- DeepSeek streaming client (`chat_pm_deepseek`)
-- Chat pipeline with session lifecycle (`chat_pm_commands`)
-- Tauri commands with event-based streaming (`src-tauri`)
-- Chat UI with session list, title display, streaming, API key config (SvelteKit)
+**已实现：**
+- 核心领域模型（`chat_pm_session`）— 仅同步、无 I/O、newtype 模式
+- 通过 `TitlePrompt` + 类型驱动状态机实现 AI 标题生成
+- 通过 `rusqlite`（`chat_pm_database`）实现 SQLite 存储 — WAL 模式、bundled
+- DeepSeek 流式客户端（`chat_pm_deepseek`）
+- 带会话生命周期的聊天管道（`chat_pm_commands`）
+- 基于事件流式传输的 Tauri 命令（`src-tauri`）
+- 聊天 UI，含会话列表、标题显示、流式传输、API key 配置（SvelteKit）
 
-**Not Yet Implemented:**
-- Summary/compression for long conversations (placeholder types exist)
-- Vector embedding / RAG integration (cosine_similarity ready)
-- End-to-end encrypted sync
-- Multi-model support (currently DeepSeek only)
-- Conversation export / import
-- User persona / custom system prompt UI
+**尚未实现：**
+- 长对话的摘要/压缩（已有占位类型）
+- 向量嵌入 / RAG 集成（cosine_similarity 已就绪）
+- 端到端加密同步
+- 多模型支持（目前仅 DeepSeek）
+- 对话导出/导入
+- 用户画像 / 自定义系统提示词 UI

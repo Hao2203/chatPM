@@ -61,6 +61,20 @@ pub struct DbStats {
     pub total_turn_count: usize,
 }
 
+// ── Error type ─────────────────────────────────────────────────────
+
+#[derive(Debug, thiserror::Error)]
+pub enum DbError {
+    #[error("数据库锁已污染")]
+    Lock,
+    #[error("SQL 错误: {0}")]
+    Sql(#[from] rusqlite::Error),
+    #[error("日期解析失败: {0}")]
+    DateParse(String),
+}
+
+pub type DbResult<T> = Result<T, DbError>;
+
 // ── Database handle ─────────────────────────────────────────────────
 
 #[derive(Debug, Clone)]
@@ -69,8 +83,13 @@ pub struct MemoryDb {
 }
 
 impl MemoryDb {
+    /// 获取数据库连接锁（内部辅助方法）。
+    fn lock_conn(&self) -> DbResult<std::sync::MutexGuard<'_, Connection>> {
+        self.conn.lock().map_err(|_| DbError::Lock)
+    }
+
     /// 打开（或创建）一个持久化的 SQLite 数据库文件。
-    pub fn open(path: impl AsRef<Path>) -> Result<Self, rusqlite::Error> {
+    pub fn open(path: impl AsRef<Path>) -> DbResult<Self> {
         let conn = Connection::open(path)?;
         conn.execute_batch("PRAGMA journal_mode=WAL; PRAGMA foreign_keys=ON;")?;
         conn.execute_batch(SCHEMA_SQL)?;
@@ -80,7 +99,7 @@ impl MemoryDb {
     }
 
     /// 打开一个内存数据库（主要用于测试）。
-    pub fn open_in_memory() -> Result<Self, rusqlite::Error> {
+    pub fn open_in_memory() -> DbResult<Self> {
         let conn = Connection::open_in_memory()?;
         conn.execute_batch(SCHEMA_SQL)?;
         Ok(Self {
@@ -90,21 +109,36 @@ impl MemoryDb {
 
     // ── Session ─────────────────────────────────────────────────
 
-    pub fn create_session(&self, session_id: &str) {
+    pub fn create_session(&self, session_id: &str) -> DbResult<()> {
         self.upsert_session(SessionRecord {
             session_id: session_id.to_string(),
             created_at: Utc::now(),
             title: None,
             user_persona: None,
-        });
+        })
     }
 
-    pub fn session_exists(&self, session_id: &str) -> bool {
-        self.get_session(session_id).is_some()
+    pub fn session_exists(&self, session_id: &str) -> DbResult<bool> {
+        Ok(self.get_session(session_id)?.is_some())
     }
 
-    pub fn upsert_session(&self, record: SessionRecord) {
-        let conn = self.conn.lock().unwrap();
+    pub fn delete_session(&self, session_id: &str) -> DbResult<bool> {
+        let conn = self.lock_conn()?;
+        conn.execute_batch("BEGIN")?;
+        conn.execute(
+            "DELETE FROM turns WHERE session_id = ?1",
+            params![session_id],
+        )?;
+        let rows = conn.execute(
+            "DELETE FROM sessions WHERE session_id = ?1",
+            params![session_id],
+        )?;
+        conn.execute_batch("COMMIT")?;
+        Ok(rows > 0)
+    }
+
+    pub fn upsert_session(&self, record: SessionRecord) -> DbResult<()> {
+        let conn = self.lock_conn()?;
         conn.execute(
             "INSERT INTO sessions (session_id, created_at, title, user_persona)
              VALUES (?1, ?2, ?3, ?4)
@@ -118,70 +152,64 @@ impl MemoryDb {
                 record.title,
                 record.user_persona,
             ],
-        )
-        .unwrap();
+        )?;
+        Ok(())
     }
 
-    pub fn get_session(&self, session_id: &str) -> Option<SessionRecord> {
-        let conn = self.conn.lock().unwrap();
-        conn.query_row(
-            "SELECT session_id, created_at, title, user_persona FROM sessions WHERE session_id = ?1",
-            params![session_id],
-            |row| {
-                let created_at: String = row.get(1)?;
-                Ok(SessionRecord {
-                    session_id: row.get(0)?,
-                    created_at: DateTime::parse_from_rfc3339(&created_at)
-                        .unwrap()
-                        .with_timezone(&Utc),
-                    title: row.get(2)?,
-                    user_persona: row.get(3)?,
-                })
-            },
-        )
-        .ok()
-    }
-
-    pub fn list_sessions(&self) -> Vec<SessionRecord> {
-        let conn = self.conn.lock().unwrap();
-        let mut stmt = conn
-            .prepare(
-                "SELECT session_id, created_at, title, user_persona FROM sessions ORDER BY created_at DESC",
+    pub fn get_session(&self, session_id: &str) -> DbResult<Option<SessionRecord>> {
+        let conn = self.lock_conn()?;
+        Ok(conn
+            .query_row(
+                "SELECT session_id, created_at, title, user_persona FROM sessions WHERE session_id = ?1",
+                params![session_id],
+                |row| {
+                    let created_at: String = row.get(1)?;
+                    Ok(SessionRecord {
+                        session_id: row.get(0)?,
+                        created_at: parse_rfc3339(&created_at)?,
+                        title: row.get(2)?,
+                        user_persona: row.get(3)?,
+                    })
+                },
             )
-            .unwrap();
-        stmt.query_map([], |row| {
+            .optional()?)
+    }
+
+    pub fn list_sessions(&self) -> DbResult<Vec<SessionRecord>> {
+        let conn = self.lock_conn()?;
+        let mut stmt = conn.prepare(
+            "SELECT session_id, created_at, title, user_persona FROM sessions ORDER BY created_at DESC",
+        )?;
+        let rows = stmt.query_map([], |row| {
             let created_at: String = row.get(1)?;
             Ok(SessionRecord {
                 session_id: row.get(0)?,
-                created_at: DateTime::parse_from_rfc3339(&created_at)
-                    .unwrap()
-                    .with_timezone(&Utc),
+                created_at: parse_rfc3339(&created_at)?,
                 title: row.get(2)?,
                 user_persona: row.get(3)?,
             })
-        })
-        .unwrap()
-        .filter_map(|r| r.ok())
-        .collect()
+        })?;
+        Ok(rows.collect::<Result<Vec<_>, _>>()?)
     }
 
-    pub fn set_session_title(&self, session_id: &str, title: &str) {
-        let conn = self.conn.lock().unwrap();
+    pub fn set_session_title(&self, session_id: &str, title: &str) -> DbResult<()> {
+        let conn = self.lock_conn()?;
         conn.execute(
             "UPDATE sessions SET title = ?1 WHERE session_id = ?2",
             params![title, session_id],
-        )
-        .unwrap();
+        )?;
+        Ok(())
     }
 
-    pub fn get_session_title(&self, session_id: &str) -> Option<String> {
-        let conn = self.conn.lock().unwrap();
-        conn.query_row(
-            "SELECT title FROM sessions WHERE session_id = ?1",
-            params![session_id],
-            |row| row.get(0),
-        )
-        .ok()
+    pub fn get_session_title(&self, session_id: &str) -> DbResult<Option<String>> {
+        let conn = self.lock_conn()?;
+        Ok(conn
+            .query_row(
+                "SELECT title FROM sessions WHERE session_id = ?1",
+                params![session_id],
+                |row| row.get(0),
+            )
+            .optional()?)
     }
 
     // ── Turns ───────────────────────────────────────────────────
@@ -191,19 +219,19 @@ impl MemoryDb {
         session_id: &str,
         user_text: String,
         assistant_text: String,
-    ) {
-        let turn_id = self.next_turn_id(session_id);
+    ) -> DbResult<()> {
+        let turn_id = self.next_turn_id(session_id)?;
         self.append_turn(TurnRecord {
             turn_id,
             session_id: session_id.to_string(),
             user_text,
             assistant_text,
             created_at: Utc::now(),
-        });
+        })
     }
 
-    pub fn append_turn(&self, record: TurnRecord) {
-        let conn = self.conn.lock().unwrap();
+    pub fn append_turn(&self, record: TurnRecord) -> DbResult<()> {
+        let conn = self.lock_conn()?;
         conn.execute(
             "INSERT INTO turns (session_id, turn_num, user_text, assistant_text, created_at)
              VALUES (?1, ?2, ?3, ?4, ?5)",
@@ -214,21 +242,19 @@ impl MemoryDb {
                 record.assistant_text,
                 record.created_at.to_rfc3339(),
             ],
-        )
-        .unwrap();
+        )?;
+        Ok(())
     }
 
-    pub fn recent_turns(&self, session_id: &str, n: usize) -> Vec<TurnRecord> {
-        let conn = self.conn.lock().unwrap();
-        let mut stmt = conn
-            .prepare(
-                "SELECT turn_num, session_id, user_text, assistant_text, created_at
-                 FROM turns
-                 WHERE session_id = ?1
-                 ORDER BY turn_num DESC
-                 LIMIT ?2",
-            )
-            .unwrap();
+    pub fn recent_turns(&self, session_id: &str, n: usize) -> DbResult<Vec<TurnRecord>> {
+        let conn = self.lock_conn()?;
+        let mut stmt = conn.prepare(
+            "SELECT turn_num, session_id, user_text, assistant_text, created_at
+             FROM turns
+             WHERE session_id = ?1
+             ORDER BY turn_num DESC
+             LIMIT ?2",
+        )?;
 
         let mut rows: Vec<TurnRecord> = stmt
             .query_map(params![session_id, n as i64], |row| {
@@ -238,75 +264,68 @@ impl MemoryDb {
                     session_id: row.get(1)?,
                     user_text: row.get(2)?,
                     assistant_text: row.get(3)?,
-                    created_at: DateTime::parse_from_rfc3339(&created_at)
-                        .unwrap()
-                        .with_timezone(&Utc),
+                    created_at: parse_rfc3339(&created_at)?,
                 })
-            })
-            .unwrap()
-            .filter_map(|r| r.ok())
-            .collect();
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
 
-        // Reverse to chronological order (oldest first)
         rows.reverse();
-        rows
+        Ok(rows)
     }
 
-    pub fn load_recent_memory(&self, session_id: &str, n: usize) -> Vec<Memory> {
-        self.recent_turns(session_id, n)
+    pub fn load_recent_memory(&self, session_id: &str, n: usize) -> DbResult<Vec<Memory>> {
+        Ok(self
+            .recent_turns(session_id, n)?
             .into_iter()
             .map(|t| t.to_memory_chunk())
-            .collect()
+            .collect())
     }
 
-    pub fn next_turn_id(&self, session_id: &str) -> TurnId {
-        let conn = self.conn.lock().unwrap();
-        let max: i64 = conn
-            .query_row(
-                "SELECT COALESCE(MAX(turn_num), 0) FROM turns WHERE session_id = ?1",
-                params![session_id],
-                |row| row.get(0),
-            )
-            .unwrap();
-        TurnId(max as u64 + 1)
+    pub fn next_turn_id(&self, session_id: &str) -> DbResult<TurnId> {
+        let conn = self.lock_conn()?;
+        let max: i64 = conn.query_row(
+            "SELECT COALESCE(MAX(turn_num), 0) FROM turns WHERE session_id = ?1",
+            params![session_id],
+            |row| row.get(0),
+        )?;
+        Ok(TurnId(max as u64 + 1))
     }
 
     // ── Config ──────────────────────────────────────────────────
 
-    pub fn set_config(&self, key: &str, value: &str) {
-        let conn = self.conn.lock().unwrap();
+    pub fn set_config(&self, key: &str, value: &str) -> DbResult<()> {
+        let conn = self.lock_conn()?;
         conn.execute(
             "INSERT INTO config (key, value) VALUES (?1, ?2)
              ON CONFLICT(key) DO UPDATE SET value = excluded.value",
             params![key, value],
-        )
-        .unwrap();
+        )?;
+        Ok(())
     }
 
-    pub fn get_config(&self, key: &str) -> Option<String> {
-        let conn = self.conn.lock().unwrap();
-        conn.query_row(
-            "SELECT value FROM config WHERE key = ?1",
-            params![key],
-            |row| row.get(0),
-        )
-        .ok()
+    pub fn get_config(&self, key: &str) -> DbResult<Option<String>> {
+        let conn = self.lock_conn()?;
+        Ok(conn
+            .query_row(
+                "SELECT value FROM config WHERE key = ?1",
+                params![key],
+                |row| row.get(0),
+            )
+            .optional()?)
     }
 
     // ── Stats ───────────────────────────────────────────────────
 
-    pub fn stats(&self) -> DbStats {
-        let conn = self.conn.lock().unwrap();
-        let session_count: usize = conn
-            .query_row("SELECT COUNT(*) FROM sessions", [], |row| row.get(0))
-            .unwrap();
-        let total_turn_count: usize = conn
-            .query_row("SELECT COUNT(*) FROM turns", [], |row| row.get(0))
-            .unwrap();
-        DbStats {
+    pub fn stats(&self) -> DbResult<DbStats> {
+        let conn = self.lock_conn()?;
+        let session_count: usize =
+            conn.query_row("SELECT COUNT(*) FROM sessions", [], |row| row.get(0))?;
+        let total_turn_count: usize =
+            conn.query_row("SELECT COUNT(*) FROM turns", [], |row| row.get(0))?;
+        Ok(DbStats {
             session_count,
             total_turn_count,
-        }
+        })
     }
 }
 
@@ -317,6 +336,36 @@ impl TurnRecord {
         Memory {
             user_text: self.user_text.clone(),
             assistant_text: self.assistant_text.clone(),
+        }
+    }
+}
+
+// ── Helpers ──────────────────────────────────────────────────────────
+
+/// 解析 RFC 3339 日期字符串（用于 in-row-closure 场景，返回 `rusqlite::Error`）。
+fn parse_rfc3339(s: &str) -> Result<DateTime<Utc>, rusqlite::Error> {
+    DateTime::parse_from_rfc3339(s)
+        .map(|ts| ts.with_timezone(&Utc))
+        .map_err(|e| {
+            rusqlite::Error::FromSqlConversionFailure(
+                0,
+                rusqlite::types::Type::Text,
+                Box::new(e),
+            )
+        })
+}
+
+/// 将 `QueryReturnedNoRows` 转换为 `None`，其他错误正常传播。
+trait OptionalExt<T> {
+    fn optional(self) -> Result<Option<T>, rusqlite::Error>;
+}
+
+impl<T> OptionalExt<T> for Result<T, rusqlite::Error> {
+    fn optional(self) -> Result<Option<T>, rusqlite::Error> {
+        match self {
+            Ok(v) => Ok(Some(v)),
+            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+            Err(e) => Err(e),
         }
     }
 }
