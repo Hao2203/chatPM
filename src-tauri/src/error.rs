@@ -67,7 +67,7 @@ impl From<anyhow::Error> for AppError {
 impl From<PipelineError> for AppError {
     fn from(e: PipelineError) -> Self {
         match e {
-            PipelineError::Domain(d) => d.into(),
+            PipelineError::Chat(d) => d.into(),
             PipelineError::Db(d) => d.into(),
             PipelineError::Api(a) => a.into(),
             PipelineError::Internal(a) => a.into(),

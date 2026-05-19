@@ -134,7 +134,7 @@ async fn send_message(
     // ── 状态机：NewSession / Session 分流 ──────────────────────
     let session = match pipeline.resume_session(session_id) {
         Ok(session) => session,
-        Err(PipelineError::Domain(
+        Err(PipelineError::Chat(
             ChatError::SessionNotFound(_) | ChatError::TitleNotGenerated(_),
         )) => {
             // 无标题或会话不存在 → 走 TitlePrompt → Session 流程

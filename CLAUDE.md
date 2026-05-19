@@ -306,7 +306,7 @@ API key 存储在 SQLite 数据库的 `config` 表中（`key="api_key"`）。启
 |---|---|---|---|
 | 领域层 | `ChatError` | `chat_pm_session::error` | 违反业务逻辑约束（会话不存在、标题未生成等） |
 | 外部接口层 | `ApiError`、`DbError` | `chat_pm_deepseek::error`、`chat_pm_database` | API 调用失败、数据库操作失败 |
-| 命令层 | `PipelineError` | `chat_pm_commands::session` | 组合 Domain + Api + Db + anyhow |
+| 命令层 | `PipelineError` | `chat_pm_commands::session` | 组合 Chat + Api + Db + Internal |
 | 接口层 | `AppError` | `src-tauri::error` | Tauri 命令返回值，序列化为 `{kind, message}` |
 
 **`ChatError`（`crates/chat_pm_session/src/error.rs`）— 纯粹的业务逻辑违反：**
@@ -361,10 +361,10 @@ pub type DbResult<T> = Result<T, DbError>;
 ```rust
 #[derive(Debug, thiserror::Error)]
 pub enum PipelineError {
-    #[error("{0}")] Domain(#[from] ChatError),
-    #[error("{0}")] Db(#[from] DbError),
-    #[error("{0}")] Api(#[from] ApiError),
-    #[error("{0}")] Internal(#[from] anyhow::Error),
+    #[error("[Chat Error] {0}")] Chat(#[from] ChatError),
+    #[error("[Database Error] {0}")] Db(#[from] DbError),
+    #[error("[API Error] {0}")] Api(#[from] ApiError),
+    #[error("[Internal Error] {0}")] Internal(#[from] anyhow::Error),
 }
 ```
 
@@ -394,12 +394,28 @@ function getErrorMessage(e: any): string {
 }
 ```
 
+**错误 Display 格式：** 所有错误类型的 `Display` 实现必须说明错误**类别**和**说明**，不得简单转发底层错误。具体规则：
+
+- **底层错误**（`ChatError`、`DbError`、`ApiError`）：每条 `#[error("...")]` 消息以自然语言描述错误，包含上下文信息（如错误的会话 ID、原因等）。内部已自带前缀（如 `ApiError` 的 `"API ..."`、`DbError::Sql` 的 `"SQL error: "`）。
+- **组合错误**（`PipelineError`）：使用 `[Category] description` 格式，类别必须有实际意义，能够直观反映错误来源。通过 `#[error("[Category] {0}")]` 在转发时添加类型前缀。
+- **接口错误**（`AppError`）：`Display` 输出 `[kind] message`，`kind` 字段作为类别标识。
+
+示例 Display 输出：
+```
+[Chat Error] Session 'abc-123' not found
+[Database Error] SQL error: table not found
+[API Error] API returned error status: 401
+[Internal Error] connection reset
+[db] SQL error: table not found                  ← AppError 前端展示
+[validation] Session 'abc-123' not found          ← AppError 前端展示
+```
+
 **错误流转链路（send_message 示例）：**
 
 ```
 [DeepSeek API] ApiError ──┐
 [SQLite]      DbError  ──┼── PipelineError ──→ AppError ──→ [Frontend] getErrorMessage(e)
-[Domain]  ChatError ───┘        ↑                    ↑
+[Chat]  ChatError ─────┘        ↑                    ↑
                             ? 自动转换          From 逐变体分发
 ```
 

@@ -20,13 +20,13 @@ use chat_pm_session::{
 
 #[derive(Debug, thiserror::Error)]
 pub enum PipelineError {
-    #[error("{0}")]
-    Domain(#[from] ChatError),
-    #[error("{0}")]
+    #[error("[Chat Error] {0}")]
+    Chat(#[from] ChatError),
+    #[error("[Database Error] {0}")]
     Db(#[from] DbError),
-    #[error("{0}")]
+    #[error("[API Error] {0}")]
     Api(#[from] ApiError),
-    #[error("{0}")]
+    #[error("[Internal Error] {0}")]
     Internal(#[from] anyhow::Error),
 }
 
