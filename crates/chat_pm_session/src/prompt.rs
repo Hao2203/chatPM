@@ -1,9 +1,9 @@
 use crate::{
-    context::Context,
     language::Language,
     memory::Memory,
     message::{ChatMessage, UserInput},
     session::SessionId,
+    summarization::Summary,
 };
 
 /// 系统提示
@@ -30,6 +30,12 @@ impl SystemPrompt {
 
         ChatMessage::system(content)
     }
+}
+
+#[derive(Debug, Clone)]
+pub struct Context {
+    pub summary: Option<Summary>,
+    pub recent_memory: Vec<Memory>,
 }
 
 #[derive(Debug, Clone)]

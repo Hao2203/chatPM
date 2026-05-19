@@ -1,5 +1,15 @@
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-pub struct TurnId(pub u64);
+pub struct TurnId(u64);
+
+impl TurnId {
+    pub fn new(v: u64) -> Self {
+        Self(v)
+    }
+
+    pub fn get(&self) -> u64 {
+        self.0
+    }
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Role {

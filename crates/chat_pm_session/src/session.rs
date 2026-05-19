@@ -67,28 +67,45 @@ impl std::fmt::Display for Title {
 /// 生命周期：`NewSession` → [`TitlePrompt`] → [`Session`]
 #[derive(Debug, Clone)]
 pub struct NewSession {
-    pub session_id: SessionId,
+    session_id: SessionId,
 }
 
 impl NewSession {
+    /// 用已有 `SessionId` 构造 `NewSession`。
+    pub fn with_id(session_id: SessionId) -> Self {
+        Self { session_id }
+    }
+
+    pub fn session_id(&self) -> SessionId {
+        self.session_id
+    }
+
     /// 转入标题生成阶段，消耗自身。
     ///
     /// `NewSession` → `TitlePrompt`
-    pub fn into_title_prompt(self, user_input: String) -> TitlePrompt {
-        TitlePrompt::new(self.session_id, user_input)
+    pub fn into_title_prompt(self, user_input: crate::message::UserInput) -> TitlePrompt {
+        TitlePrompt::new(self.session_id, user_input.into_inner())
     }
 }
 
 /// 已完成标题生成的正式会话：可以在此之上进行对话。
 #[derive(Debug, Clone)]
 pub struct Session {
-    pub session_id: SessionId,
-    pub title: Title,
+    session_id: SessionId,
+    title: Title,
 }
 
 impl Session {
     /// 从持久化记录恢复（已确认 title 存在）。
     pub fn resume(session_id: SessionId, title: Title) -> Self {
         Self { session_id, title }
+    }
+
+    pub fn session_id(&self) -> SessionId {
+        self.session_id
+    }
+
+    pub fn title(&self) -> &Title {
+        &self.title
     }
 }

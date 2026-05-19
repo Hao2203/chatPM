@@ -91,7 +91,7 @@ fn create_session(state: State<'_, AppState>) -> Result<String, AppError> {
         .as_ref()
         .ok_or_else(AppError::not_configured)?;
     let new_session = service.create_session().map_err(AppError::from)?;
-    Ok(new_session.session_id.to_string())
+    Ok(new_session.session_id().to_string())
 }
 
 #[tauri::command]
@@ -138,15 +138,15 @@ async fn send_message(
             ChatError::SessionNotFound(_) | ChatError::TitleNotGenerated(_),
         )) => {
             // 无标题或会话不存在 → 走 TitlePrompt → Session 流程
-            let new_session = NewSession { session_id };
-            let tp = new_session.into_title_prompt(user_input.to_string());
+            let new_session = NewSession::with_id(session_id);
+            let tp = new_session.into_title_prompt(user_input.clone());
             let session = service.finalize_session(tp).await?;
 
             let _ = app.emit(
                 "session-title-updated",
                 SessionTitlePayload {
-                    session_id: session.session_id.to_string(),
-                    title: session.title.to_string(),
+                    session_id: session.session_id().to_string(),
+                    title: session.title().to_string(),
                 },
             );
 
@@ -160,7 +160,7 @@ async fn send_message(
         .await
         .map_err(AppError::from)?;
 
-    let sid_str = session.session_id.to_string();
+    let sid_str = session.session_id().to_string();
     let app_handle = app.clone();
 
     // Spawn a task to forward streaming chunks as Tauri events
@@ -225,7 +225,7 @@ fn get_turns(state: State<'_, AppState>, session_id: String) -> Result<Vec<TurnI
     let infos: Vec<TurnInfo> = turns
         .into_iter()
         .map(|t| TurnInfo {
-            turn_num: t.turn_id.0,
+            turn_num: t.turn_id.get(),
             user_text: t.user_text,
             assistant_text: t.assistant_text,
             prompt_tokens: t.prompt_tokens,

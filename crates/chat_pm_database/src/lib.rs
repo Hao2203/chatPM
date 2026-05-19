@@ -263,7 +263,7 @@ impl MemoryDb {
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
             params![
                 record.session_id,
-                record.turn_id.0,
+                record.turn_id.get(),
                 record.user_text,
                 record.assistant_text,
                 record.created_at.to_rfc3339(),
@@ -288,7 +288,7 @@ impl MemoryDb {
             .query_map(params![session_id, n as i64], |row| {
                 let created_at: String = row.get(4)?;
                 Ok(TurnRecord {
-                    turn_id: TurnId(row.get::<_, i64>(0)? as u64),
+                    turn_id: TurnId::new(row.get::<_, i64>(0)? as u64),
                     session_id: row.get(1)?,
                     user_text: row.get(2)?,
                     assistant_text: row.get(3)?,
@@ -318,7 +318,7 @@ impl MemoryDb {
             params![session_id],
             |row| row.get(0),
         )?;
-        Ok(TurnId(max as u64 + 1))
+        Ok(TurnId::new(max as u64 + 1))
     }
 
     // ── Summaries ───────────────────────────────────────────────

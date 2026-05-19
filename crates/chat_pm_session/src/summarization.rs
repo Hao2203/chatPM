@@ -1,4 +1,10 @@
-use crate::summary::Summary;
+use crate::TurnId;
+
+#[derive(Debug, Clone)]
+pub struct Summary {
+    pub content: String,
+    pub last_turn_id: TurnId,
+}
 
 /// 判断 prompt_tokens 是否超过阈值，需要触发摘要压缩。
 pub fn should_summarize(prompt_tokens: usize, context_window: usize, ratio: f64) -> bool {
@@ -30,7 +36,7 @@ pub fn plan_summarization(
 
     let cutoff = total_turns - short_term;
     let last_summarized = existing_summary
-        .map(|s| s.last_turn_id.0)
+        .map(|s| s.last_turn_id.get())
         .unwrap_or(0);
 
     if cutoff <= last_summarized {
@@ -51,7 +57,7 @@ pub fn turn_range_to_summarize(
     plan: &SummarizationPlan,
 ) -> (u64, u64) {
     let from = existing_summary
-        .map(|s| s.last_turn_id.0 + 1)
+        .map(|s| s.last_turn_id.get() + 1)
         .unwrap_or(1);
     (from, plan.new_last_turn_num)
 }
@@ -59,7 +65,6 @@ pub fn turn_range_to_summarize(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::summary::Summary;
 
     #[test]
     fn test_should_summarize_below_threshold() {
@@ -86,7 +91,7 @@ mod tests {
     fn test_plan_summarization_incremental() {
         let existing = Summary {
             content: "old summary".into(),
-            last_turn_id: crate::TurnId(4),
+            last_turn_id: crate::TurnId::new(4),
         };
         let plan = plan_summarization(12, 6, Some(&existing)).unwrap();
         assert_eq!(plan.new_last_turn_num, 6);
@@ -96,7 +101,7 @@ mod tests {
     fn test_plan_summarization_no_new_turns() {
         let existing = Summary {
             content: "old summary".into(),
-            last_turn_id: crate::TurnId(6),
+            last_turn_id: crate::TurnId::new(6),
         };
         // total=12, short=6, cutoff=6, last_summarized=6 → cutoff <= last
         assert!(plan_summarization(12, 6, Some(&existing)).is_none());
@@ -116,7 +121,7 @@ mod tests {
     fn test_turn_range_incremental() {
         let existing = Summary {
             content: "old".into(),
-            last_turn_id: crate::TurnId(4),
+            last_turn_id: crate::TurnId::new(4),
         };
         let plan = SummarizationPlan {
             new_last_turn_num: 6,

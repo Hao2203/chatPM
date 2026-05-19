@@ -26,7 +26,7 @@ async fn demo() -> Result<()> {
     let mut new_session = Some(service.create_session()?);
     println!(
         "会话已创建，session_id = {}",
-        new_session.as_ref().unwrap().session_id
+        new_session.as_ref().unwrap().session_id()
     );
 
     // ── 2. 首轮：NewSession → TitlePrompt → Session → chat ──────
@@ -47,9 +47,9 @@ async fn demo() -> Result<()> {
 
         let s = if i == 0 {
             // 首轮：NewSession → TitlePrompt → finalize → Session
-            let tp = new_session.take().unwrap().into_title_prompt(user_text.to_string());
+            let tp = new_session.take().unwrap().into_title_prompt(UserInput::new(user_text));
             let s = service.finalize_session(tp).await?;
-            println!("标题已生成：{}", s.title);
+            println!("标题已生成：{}", s.title());
             s
         } else {
             session.clone().unwrap()
@@ -70,7 +70,7 @@ async fn demo() -> Result<()> {
     println!("用户：刚才我们聊到哪里了？");
     println!("{}", "═".repeat(60));
 
-    let saved_id = session.as_ref().unwrap().session_id;
+    let saved_id = session.as_ref().unwrap().session_id();
 
     match service.resume_session(saved_id) {
         Ok(resumed) => {

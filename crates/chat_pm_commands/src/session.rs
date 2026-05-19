@@ -7,13 +7,12 @@ use tracing::{debug, info};
 use chat_pm_session::{
     ChatError,
     chat::MessageFrame,
-    context::Context,
     memory::Memory,
     message::UserInput,
-    prompt::{PromptComposer, SummaryPrompt, SystemPrompt, TitlePrompt},
+    prompt::{Context, PromptComposer, SummaryPrompt, SystemPrompt, TitlePrompt},
     session::{NewSession, Session, SessionId, Title},
     summarization,
-    summary::Summary,
+    summarization::Summary,
 };
 
 // ── CommandError ───────────────────────────────────────────────────
@@ -138,10 +137,7 @@ impl ChatService {
         Ok(Self { client, db, config })
     }
 
-    pub fn with_default_deepseek(
-        db: MemoryDb,
-        config: ChatConfig,
-    ) -> Result<Self, CommandError> {
+    pub fn with_default_deepseek(db: MemoryDb, config: ChatConfig) -> Result<Self, CommandError> {
         let client = DeepseekClient::from_env()?;
         Self::new(db, client, config)
     }
@@ -155,7 +151,7 @@ impl ChatService {
         let session_id = SessionId::new();
         self.db.create_session(&session_id.to_string())?;
         info!(%session_id, "新会话已创建");
-        Ok(NewSession { session_id })
+        Ok(NewSession::with_id(session_id))
     }
 
     // ── Lifecycle: TitlePrompt → Session ────────────────────────────
@@ -176,7 +172,7 @@ impl ChatService {
         let sid = session_id.to_string();
         self.db.set_session_title(&sid, title.as_str())?;
         info!(session_id = %sid, %title, "会话标题已生成");
-        Ok(Session { session_id, title })
+        Ok(Session::resume(session_id, title))
     }
 
     /// 从持久化记录恢复 `Session`（仅限已有标题的会话）。
@@ -210,7 +206,7 @@ impl ChatService {
         session: &Session,
         user_input: UserInput,
     ) -> Result<mpsc::Receiver<Result<MessageFrame, ApiError>>, CommandError> {
-        let sid = session.session_id.to_string();
+        let sid = session.session_id().to_string();
         info!(%sid, "开始处理");
 
         // 载入摘要（如有）
@@ -219,7 +215,7 @@ impl ChatService {
             .get_summary(&sid)?
             .map(|(content, last_turn_num)| Summary {
                 content,
-                last_turn_id: chat_pm_session::TurnId(last_turn_num as u64),
+                last_turn_id: chat_pm_session::TurnId::new(last_turn_num as u64),
             });
 
         let recent_memory = self
@@ -350,7 +346,7 @@ async fn summarize_session_inner(
     let existing = db.get_summary(sid)?;
     let existing_summary = existing.as_ref().map(|(c, last_num)| Summary {
         content: c.clone(),
-        last_turn_id: chat_pm_session::TurnId(*last_num as u64),
+        last_turn_id: chat_pm_session::TurnId::new(*last_num as u64),
     });
 
     let plan = match summarization::plan_summarization(
