@@ -16,10 +16,10 @@ use chat_pm_session::{
     summary::Summary,
 };
 
-// ── PipelineError ───────────────────────────────────────────────────
+// ── CommandError ───────────────────────────────────────────────────
 
 #[derive(Debug, thiserror::Error)]
-pub enum PipelineError {
+pub enum CommandError {
     #[error("[Chat Error] {0}")]
     Chat(#[from] ChatError),
     #[error("[Database Error] {0}")]
@@ -31,7 +31,7 @@ pub enum PipelineError {
 }
 
 #[derive(Debug, Clone)]
-pub struct PipelineConfig {
+pub struct ChatConfig {
     pub chat_model: String,
     pub token_limit: usize,
     pub reply_token_limit: usize,
@@ -44,7 +44,7 @@ pub struct PipelineConfig {
     pub reasoning_effort: Option<ReasoningEffort>,
 }
 
-impl PipelineConfig {
+impl ChatConfig {
     pub fn validate(&self) -> AnyhowResult<()> {
         if self.reply_token_limit == 0 {
             return Err(anyhow::anyhow!("reply_token_limit must be > 0"));
@@ -72,7 +72,7 @@ impl PipelineConfig {
     }
 }
 
-impl Default for PipelineConfig {
+impl Default for ChatConfig {
     fn default() -> Self {
         Self {
             chat_model: "deepseek-v4-flash".to_string(),
@@ -119,29 +119,29 @@ fn summary_request_config(model: &str) -> ChatRequestConfig {
     }
 }
 
-// ── ChatPipeline ────────────────────────────────────────────────────
+// ── ChatService ────────────────────────────────────────────────────
 
 #[derive(Clone)]
-pub struct ChatPipeline {
+pub struct ChatService {
     client: DeepseekClient,
     db: MemoryDb,
-    config: PipelineConfig,
+    config: ChatConfig,
 }
 
-impl ChatPipeline {
+impl ChatService {
     pub fn new(
         db: MemoryDb,
         client: DeepseekClient,
-        config: PipelineConfig,
-    ) -> Result<Self, PipelineError> {
+        config: ChatConfig,
+    ) -> Result<Self, CommandError> {
         config.validate()?;
         Ok(Self { client, db, config })
     }
 
     pub fn with_default_deepseek(
         db: MemoryDb,
-        config: PipelineConfig,
-    ) -> Result<Self, PipelineError> {
+        config: ChatConfig,
+    ) -> Result<Self, CommandError> {
         let client = DeepseekClient::from_env()?;
         Self::new(db, client, config)
     }
@@ -151,7 +151,7 @@ impl ChatPipeline {
     /// 创建新会话 → `NewSession`。
     ///
     /// 数据库记录已写入，但标题尚未生成。
-    pub fn create_session(&self) -> Result<NewSession, PipelineError> {
+    pub fn create_session(&self) -> Result<NewSession, CommandError> {
         let session_id = SessionId::new();
         self.db.create_session(&session_id.to_string())?;
         info!(%session_id, "新会话已创建");
@@ -163,7 +163,7 @@ impl ChatPipeline {
     /// `TitlePrompt` → `Session`：调用 LLM 生成标题，持久化后转入正式会话。
     ///
     /// 消耗 `TitlePrompt`，确保标题生成只发生一次。
-    pub async fn finalize_session(&self, tp: TitlePrompt) -> Result<Session, PipelineError> {
+    pub async fn finalize_session(&self, tp: TitlePrompt) -> Result<Session, CommandError> {
         let session_id = tp.session_id();
         let messages = tp.compose();
 
@@ -180,7 +180,7 @@ impl ChatPipeline {
     }
 
     /// 从持久化记录恢复 `Session`（仅限已有标题的会话）。
-    pub fn resume_session(&self, session_id: SessionId) -> Result<Session, PipelineError> {
+    pub fn resume_session(&self, session_id: SessionId) -> Result<Session, CommandError> {
         let sid = session_id.to_string();
         let record = self
             .db
@@ -191,7 +191,7 @@ impl ChatPipeline {
     }
 
     /// 删除会话及其所有聊天记录。
-    pub fn delete_session(&self, session_id: SessionId) -> Result<bool, PipelineError> {
+    pub fn delete_session(&self, session_id: SessionId) -> Result<bool, CommandError> {
         let sid = session_id.to_string();
         let deleted = self.db.delete_session(&sid)?;
         if deleted {
@@ -209,7 +209,7 @@ impl ChatPipeline {
         &self,
         session: &Session,
         user_input: UserInput,
-    ) -> Result<mpsc::Receiver<Result<MessageFrame, ApiError>>, PipelineError> {
+    ) -> Result<mpsc::Receiver<Result<MessageFrame, ApiError>>, CommandError> {
         let sid = session.session_id.to_string();
         info!(%sid, "开始处理");
 
@@ -332,7 +332,7 @@ impl ChatPipeline {
     }
 
     /// 手动触发指定会话的摘要压缩（对外暴露，也可用于测试）。
-    pub async fn summarize_session(&self, session_id: SessionId) -> Result<(), PipelineError> {
+    pub async fn summarize_session(&self, session_id: SessionId) -> Result<(), CommandError> {
         let sid = session_id.to_string();
         summarize_session_inner(&self.db, &self.client, &self.config, &sid).await
     }
@@ -343,9 +343,9 @@ impl ChatPipeline {
 async fn summarize_session_inner(
     db: &MemoryDb,
     client: &DeepseekClient,
-    config: &PipelineConfig,
+    config: &ChatConfig,
     sid: &str,
-) -> Result<(), PipelineError> {
+) -> Result<(), CommandError> {
     let total_turns = db.count_turns(sid)?;
     let existing = db.get_summary(sid)?;
     let existing_summary = existing.as_ref().map(|(c, last_num)| Summary {

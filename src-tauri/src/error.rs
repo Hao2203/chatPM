@@ -1,4 +1,4 @@
-use chat_pm_commands::session::PipelineError;
+use chat_pm_commands::session::CommandError;
 use chat_pm_database::DbError;
 use chat_pm_deepseek::ApiError;
 use chat_pm_session::ChatError;
@@ -64,13 +64,13 @@ impl From<anyhow::Error> for AppError {
     }
 }
 
-impl From<PipelineError> for AppError {
-    fn from(e: PipelineError) -> Self {
+impl From<CommandError> for AppError {
+    fn from(e: CommandError) -> Self {
         match e {
-            PipelineError::Chat(d) => d.into(),
-            PipelineError::Db(d) => d.into(),
-            PipelineError::Api(a) => a.into(),
-            PipelineError::Internal(a) => a.into(),
+            CommandError::Chat(d) => d.into(),
+            CommandError::Db(d) => d.into(),
+            CommandError::Api(a) => a.into(),
+            CommandError::Internal(a) => a.into(),
         }
     }
 }

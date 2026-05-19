@@ -1,4 +1,4 @@
-use chat_pm_commands::session::{ChatPipeline, PipelineConfig, PipelineError};
+use chat_pm_commands::session::{ChatService, ChatConfig, CommandError};
 use chat_pm_database::MemoryDb;
 use chat_pm_session::{
     ChatError,
@@ -17,7 +17,7 @@ use error::AppError;
 struct AppState {
     db: std::sync::Mutex<MemoryDb>,
     db_path: std::path::PathBuf,
-    pipeline: Mutex<Option<ChatPipeline>>,
+    service: Mutex<Option<ChatService>>,
 }
 
 // ── Payload types for events & responses ────────────────────────────
@@ -64,48 +64,48 @@ struct TurnInfo {
 
 // ── Helper ──────────────────────────────────────────────────────────
 
-/// Try to build a ChatPipeline from a stored API key string.
-fn build_pipeline(db: &MemoryDb, raw_key: &str) -> Result<ChatPipeline, AppError> {
+/// Try to build a ChatService from a stored API key string.
+fn build_service(db: &MemoryDb, raw_key: &str) -> Result<ChatService, AppError> {
     let key = chat_pm_deepseek::ApiKey::new(raw_key)
         .ok_or_else(|| AppError::new("validation", "无效的 API Key"))?;
     let client = chat_pm_deepseek::Client::new(key);
-    let config = PipelineConfig::default();
-    ChatPipeline::new(db.clone(), client, config).map_err(AppError::from)
+    let config = ChatConfig::default();
+    ChatService::new(db.clone(), client, config).map_err(AppError::from)
 }
 
 // ── Commands ────────────────────────────────────────────────────────
 
 #[tauri::command]
 async fn check_api_key(state: State<'_, AppState>) -> Result<bool, AppError> {
-    let guard = state.pipeline.lock().await;
+    let guard = state.service.lock().await;
     Ok(guard.is_some())
 }
 
 #[tauri::command]
 fn create_session(state: State<'_, AppState>) -> Result<String, AppError> {
     let guard = state
-        .pipeline
+        .service
         .try_lock()
         .map_err(|_| AppError::locked())?;
-    let pipeline = guard
+    let service = guard
         .as_ref()
         .ok_or_else(AppError::not_configured)?;
-    let new_session = pipeline.create_session().map_err(AppError::from)?;
+    let new_session = service.create_session().map_err(AppError::from)?;
     Ok(new_session.session_id.to_string())
 }
 
 #[tauri::command]
 fn set_api_key(state: State<'_, AppState>, api_key: String) -> Result<(), AppError> {
     let db = state.db.try_lock().map_err(|_| AppError::locked())?;
-    let pipeline = build_pipeline(&db, &api_key)?;
+    let service = build_service(&db, &api_key)?;
     db.set_config("api_key", &api_key)?;
     drop(db);
 
     let mut guard = state
-        .pipeline
+        .service
         .try_lock()
         .map_err(|_| AppError::locked())?;
-    *guard = Some(pipeline);
+    *guard = Some(service);
 
     tracing::info!("API key 已配置并持久化");
     Ok(())
@@ -118,8 +118,8 @@ async fn send_message(
     session_id: String,
     content: String,
 ) -> Result<(), AppError> {
-    let pipeline = {
-        let guard = state.pipeline.lock().await;
+    let service = {
+        let guard = state.service.lock().await;
         guard
             .clone()
             .ok_or_else(AppError::not_configured)?
@@ -132,15 +132,15 @@ async fn send_message(
     let user_input = UserInput::new(&content);
 
     // ── 状态机：NewSession / Session 分流 ──────────────────────
-    let session = match pipeline.resume_session(session_id) {
+    let session = match service.resume_session(session_id) {
         Ok(session) => session,
-        Err(PipelineError::Chat(
+        Err(CommandError::Chat(
             ChatError::SessionNotFound(_) | ChatError::TitleNotGenerated(_),
         )) => {
             // 无标题或会话不存在 → 走 TitlePrompt → Session 流程
             let new_session = NewSession { session_id };
             let tp = new_session.into_title_prompt(user_input.to_string());
-            let session = pipeline.finalize_session(tp).await?;
+            let session = service.finalize_session(tp).await?;
 
             let _ = app.emit(
                 "session-title-updated",
@@ -155,7 +155,7 @@ async fn send_message(
         Err(e) => return Err(e.into()),
     };
 
-    let mut stream = pipeline
+    let mut stream = service
         .chat(&session, user_input)
         .await
         .map_err(AppError::from)?;
@@ -273,8 +273,8 @@ fn delete_session(
 
 #[tauri::command]
 fn clear_all_data(app: tauri::AppHandle, state: State<'_, AppState>) -> Result<(), AppError> {
-    // 1. Drop pipeline
-    *state.pipeline.try_lock().map_err(|_| AppError::locked())? = None;
+    // 1. Drop service
+    *state.service.try_lock().map_err(|_| AppError::locked())? = None;
 
     let db_path = state.db_path.clone();
 
@@ -318,20 +318,20 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
             tracing::info!(path = %db_path.display(), "数据库已打开");
 
             // Try to restore API key from previous session
-            let pipeline = db
+            let service = db
                 .get_config("api_key")
                 .ok()
                 .flatten()
-                .and_then(|raw_key| build_pipeline(&db, &raw_key).ok());
+                .and_then(|raw_key| build_service(&db, &raw_key).ok());
 
-            if pipeline.is_some() {
+            if service.is_some() {
                 tracing::info!("已从数据库恢复 API key");
             }
 
             app.manage(AppState {
                 db: std::sync::Mutex::new(db),
                 db_path,
-                pipeline: Mutex::new(pipeline),
+                service: Mutex::new(service),
             });
 
             Ok(())

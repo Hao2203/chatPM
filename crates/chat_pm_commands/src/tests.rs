@@ -7,7 +7,7 @@ use logforth::{
     record::{Level, LevelFilter},
 };
 
-use crate::session::{ChatPipeline, PipelineConfig};
+use crate::session::{ChatService, ChatConfig};
 use chat_pm_database::MemoryDb;
 
 #[tokio::test]
@@ -19,11 +19,11 @@ async fn demo() -> Result<()> {
     dotenvy::dotenv()?;
 
     let db = MemoryDb::open_in_memory()?;
-    let config = PipelineConfig::default();
-    let pipeline = ChatPipeline::with_default_deepseek(db, config)?;
+    let config = ChatConfig::default();
+    let service = ChatService::with_default_deepseek(db, config)?;
 
     // ── 1. 创建会话 → NewSession ──────────────────────────────────
-    let mut new_session = Some(pipeline.create_session()?);
+    let mut new_session = Some(service.create_session()?);
     println!(
         "会话已创建，session_id = {}",
         new_session.as_ref().unwrap().session_id
@@ -48,14 +48,14 @@ async fn demo() -> Result<()> {
         let s = if i == 0 {
             // 首轮：NewSession → TitlePrompt → finalize → Session
             let tp = new_session.take().unwrap().into_title_prompt(user_text.to_string());
-            let s = pipeline.finalize_session(tp).await?;
+            let s = service.finalize_session(tp).await?;
             println!("标题已生成：{}", s.title);
             s
         } else {
             session.clone().unwrap()
         };
 
-        let mut stream = pipeline.chat(&s, user_input).await?;
+        let mut stream = service.chat(&s, user_input).await?;
         print!("助手：");
         while let Some(Ok(frame)) = stream.recv().await {
             print(&frame.content);
@@ -72,9 +72,9 @@ async fn demo() -> Result<()> {
 
     let saved_id = session.as_ref().unwrap().session_id;
 
-    match pipeline.resume_session(saved_id) {
+    match service.resume_session(saved_id) {
         Ok(resumed) => {
-            let mut stream = pipeline
+            let mut stream = service
                 .chat(&resumed, UserInput::new("刚才我们聊到哪里了？"))
                 .await?;
             print!("助手：");

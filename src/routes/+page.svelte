@@ -37,7 +37,7 @@
   let sending = $state(false);
   let sessionToDelete = $state<string | null>(null);
   let contextTokens = $state(0);
-  const CONTEXT_WINDOW = 1_048_576; // must match PipelineConfig.context_window
+  const CONTEXT_WINDOW = 1_048_576; // must match ChatConfig.context_window
 
   function formatNumber(n: number): string {
     return n.toLocaleString("en-US");
