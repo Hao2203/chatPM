@@ -427,13 +427,19 @@ emit("chat-done")
 
 ## 测试
 
-测试在 `crates/chat_pm_commands/src/tests.rs` 中 — 集成测试（`demo`）：
+### Rust 后端
+集成测试在 `crates/chat_pm_commands/src/tests.rs` 中 — 集成测试（`demo`）：
 1. 从 `.env` 加载 `DEEPSEEK_API_KEY`
 2. 创建 `MemoryDb::open_in_memory()` + `ChatPipeline`
 3. 运行多轮对话
 4. 模拟跨"HTTP 请求"的会话恢复
 
 运行：`cargo test --package chat_pm_commands`
+
+### 前端
+所有前端操作使用 **bun**（项目根目录执行）：
+- 类型检查：`bun run check`（运行 `svelte-kit sync && svelte-check`）
+- 构建：`bun run build`（运行 `vite build`）
 
 ---
 

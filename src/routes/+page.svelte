@@ -172,6 +172,15 @@
     }
   }
 
+  // ── Clear all data ─────────────────────────────────────────
+  async function clearAllData() {
+    try {
+      await invoke("clear_all_data");
+    } catch (e: any) {
+      alert("清除数据失败：" + getErrorMessage(e));
+    }
+  }
+
   // ── Send message ───────────────────────────────────────────
   async function sendMessage() {
     const text = inputText.trim();
@@ -305,9 +314,29 @@
     let unlistenDelete: UnlistenFn | null = null;
     setupDeleteListener().then((fn) => (unlistenDelete = fn));
 
+    // Listen for data-cleared
+    const setupClearListener = async () => {
+      const unlisten = await listen("data-cleared", () => {
+        apiKeyConfigured = false;
+        apiKey = "";
+        showSettings = false;
+        sessions = [];
+        activeSessionId = null;
+        pendingNewChat = false;
+        messages = [];
+        messageId = 0;
+        contextTokens = 0;
+        // keep drafts, they'll be stale but harmless
+      });
+      return unlisten;
+    };
+    let unlistenClear: UnlistenFn | null = null;
+    setupClearListener().then((fn) => (unlistenClear = fn));
+
     return () => {
       if (unlistenTitle) unlistenTitle();
       if (unlistenDelete) unlistenDelete();
+      if (unlistenClear) unlistenClear();
     };
   });
 </script>
@@ -426,6 +455,7 @@
   onapikeychange={(val: string) => (apiKey = val)}
   onclose={() => (showSettings = false)}
   onsave={configureApiKey}
+  onclear={clearAllData}
 />
 
 <ConfirmDialog
@@ -438,6 +468,7 @@
   onconfirm={confirmDeleteSession}
   oncancel={() => (sessionToDelete = null)}
 />
+
 
 <style>
   /* ── CSS Variables (ChatGPT dark theme) ────────────────── */

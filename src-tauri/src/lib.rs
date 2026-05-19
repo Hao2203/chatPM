@@ -15,7 +15,8 @@ use error::AppError;
 // ── State ───────────────────────────────────────────────────────────
 
 struct AppState {
-    db: MemoryDb,
+    db: std::sync::Mutex<MemoryDb>,
+    db_path: std::path::PathBuf,
     pipeline: Mutex<Option<ChatPipeline>>,
 }
 
@@ -95,13 +96,11 @@ fn create_session(state: State<'_, AppState>) -> Result<String, AppError> {
 
 #[tauri::command]
 fn set_api_key(state: State<'_, AppState>, api_key: String) -> Result<(), AppError> {
-    // Validate and build pipeline
-    let pipeline = build_pipeline(&state.db, &api_key)?;
+    let db = state.db.try_lock().map_err(|_| AppError::locked())?;
+    let pipeline = build_pipeline(&db, &api_key)?;
+    db.set_config("api_key", &api_key)?;
+    drop(db);
 
-    // Persist to database
-    state.db.set_config("api_key", &api_key)?;
-
-    // Store in memory
     let mut guard = state
         .pipeline
         .try_lock()
@@ -207,7 +206,8 @@ async fn send_message(
 
 #[tauri::command]
 fn list_sessions(state: State<'_, AppState>) -> Result<Vec<SessionInfo>, AppError> {
-    let sessions = state.db.list_sessions()?;
+    let db = state.db.try_lock().map_err(|_| AppError::locked())?;
+    let sessions = db.list_sessions()?;
     Ok(sessions
         .into_iter()
         .map(|s| SessionInfo {
@@ -220,7 +220,8 @@ fn list_sessions(state: State<'_, AppState>) -> Result<Vec<SessionInfo>, AppErro
 
 #[tauri::command]
 fn get_turns(state: State<'_, AppState>, session_id: String) -> Result<Vec<TurnInfo>, AppError> {
-    let turns = state.db.recent_turns(&session_id, 1000)?;
+    let db = state.db.try_lock().map_err(|_| AppError::locked())?;
+    let turns = db.recent_turns(&session_id, 1000)?;
     let infos: Vec<TurnInfo> = turns
         .into_iter()
         .map(|t| TurnInfo {
@@ -241,7 +242,9 @@ fn update_session_title(
     session_id: String,
     title: String,
 ) -> Result<(), AppError> {
-    state.db.set_session_title(&session_id, &title)?;
+    let db = state.db.try_lock().map_err(|_| AppError::locked())?;
+    db.set_session_title(&session_id, &title)?;
+    drop(db);
     let _ = app.emit(
         "session-title-updated",
         SessionTitlePayload {
@@ -258,11 +261,44 @@ fn delete_session(
     state: State<'_, AppState>,
     session_id: String,
 ) -> Result<(), AppError> {
-    state.db.delete_session(&session_id)?;
+    let db = state.db.try_lock().map_err(|_| AppError::locked())?;
+    db.delete_session(&session_id)?;
+    drop(db);
     let _ = app.emit(
         "session-deleted",
         SessionDeletedPayload { session_id },
     );
+    Ok(())
+}
+
+#[tauri::command]
+fn clear_all_data(app: tauri::AppHandle, state: State<'_, AppState>) -> Result<(), AppError> {
+    // 1. Drop pipeline
+    *state.pipeline.try_lock().map_err(|_| AppError::locked())? = None;
+
+    let db_path = state.db_path.clone();
+
+    // 2. Drop old db connection
+    let placeholder = MemoryDb::open_in_memory().map_err(AppError::from)?;
+    let old_db = {
+        let mut guard = state.db.try_lock().map_err(|_| AppError::locked())?;
+        std::mem::replace(&mut *guard, placeholder)
+    };
+    drop(old_db);
+
+    // 3. Delete database files (ignore not-found errors)
+    let _ = std::fs::remove_file(&db_path);
+    let _ = std::fs::remove_file(db_path.with_extension("db-wal"));
+    let _ = std::fs::remove_file(db_path.with_extension("db-shm"));
+
+    // 4. Create fresh database
+    let new_db = MemoryDb::open(&db_path).map_err(AppError::from)?;
+    *state.db.try_lock().map_err(|_| AppError::locked())? = new_db;
+
+    // 5. Emit event
+    app.emit("data-cleared", ()).map_err(|e| AppError::new("internal", e.to_string()))?;
+
+    tracing::info!("所有数据已清除，数据库已重建");
     Ok(())
 }
 
@@ -293,7 +329,8 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
             }
 
             app.manage(AppState {
-                db,
+                db: std::sync::Mutex::new(db),
+                db_path,
                 pipeline: Mutex::new(pipeline),
             });
 
@@ -308,6 +345,7 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
             get_turns,
             update_session_title,
             delete_session,
+            clear_all_data,
         ])
         .run(tauri::generate_context!())
         .map_err(|e| Box::new(e) as Box<dyn std::error::Error>)?;
