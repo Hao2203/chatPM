@@ -80,7 +80,7 @@ impl Default for PipelineConfig {
             reply_token_limit: 2048,
             short_term_turns: 6,
             long_term_top_k: 4,
-            context_window: 1_048_576,     // DeepSeek V4 Flash 1M
+            context_window: 1_048_576, // DeepSeek V4 Flash 1M
             summary_ratio: 0.6,
             system_role: "你是一名智能助手，能够记住对话历史并提供连贯的回答。".to_string(),
             thinking_enabled: false,
@@ -129,12 +129,19 @@ pub struct ChatPipeline {
 }
 
 impl ChatPipeline {
-    pub fn new(db: MemoryDb, client: DeepseekClient, config: PipelineConfig) -> Result<Self, PipelineError> {
+    pub fn new(
+        db: MemoryDb,
+        client: DeepseekClient,
+        config: PipelineConfig,
+    ) -> Result<Self, PipelineError> {
         config.validate()?;
         Ok(Self { client, db, config })
     }
 
-    pub fn with_default_deepseek(db: MemoryDb, config: PipelineConfig) -> Result<Self, PipelineError> {
+    pub fn with_default_deepseek(
+        db: MemoryDb,
+        config: PipelineConfig,
+    ) -> Result<Self, PipelineError> {
         let client = DeepseekClient::from_env()?;
         Self::new(db, client, config)
     }
@@ -179,9 +186,7 @@ impl ChatPipeline {
             .db
             .get_session(&sid)?
             .ok_or(ChatError::SessionNotFound(sid.clone()))?;
-        let title = record
-            .title
-            .ok_or(ChatError::TitleNotGenerated(sid))?;
+        let title = record.title.ok_or(ChatError::TitleNotGenerated(sid))?;
         Ok(Session::resume(session_id, Title::new(title)))
     }
 
@@ -209,12 +214,13 @@ impl ChatPipeline {
         info!(%sid, "开始处理");
 
         // 载入摘要（如有）
-        let summary = self.db.get_summary(&sid)?.map(|(content, last_turn_num)| {
-            Summary {
+        let summary = self
+            .db
+            .get_summary(&sid)?
+            .map(|(content, last_turn_num)| Summary {
                 content,
                 last_turn_id: chat_pm_session::TurnId(last_turn_num as u64),
-            }
-        });
+            });
 
         let recent_memory = self
             .db
@@ -316,10 +322,9 @@ impl ChatPipeline {
                 prompt_tokens_result,
                 config.context_window,
                 config.summary_ratio,
-            ) {
-                if let Err(e) = summarize_session_inner(&db, &client, &config, &sid).await {
-                    tracing::error!(%sid, error = %e, "摘要生成失败");
-                }
+            ) && let Err(e) = summarize_session_inner(&db, &client, &config, &sid).await
+            {
+                tracing::error!(%sid, error = %e, "摘要生成失败");
             }
         });
 
@@ -364,10 +369,7 @@ async fn summarize_session_inner(
         return Ok(());
     }
 
-    let prompt = SummaryPrompt::new(
-        existing.map(|(c, _)| c),
-        new_turns,
-    );
+    let prompt = SummaryPrompt::new(existing.map(|(c, _)| c), new_turns);
     let messages = prompt.compose();
 
     let new_content = client

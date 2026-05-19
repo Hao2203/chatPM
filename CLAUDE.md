@@ -294,6 +294,7 @@ API key 存储在 SQLite 数据库的 `config` 表中（`key="api_key"`）。启
 - Workspace lints：`clippy::dbg_macro = "warn"`
 - 日志：`tracing` 配合 `logforth` 桥接（在测试中配置）
 - 日期/时间以 RFC 3339 字符串形式存储在 SQLite 中
+- **前端组件属性（Props）必须使用驼峰命名法**，例如 `onApiKeyChange` 而非 `onapikeychange`，`onUpdateTitle` 而非 `onupdatetitle`
 
 ### 错误处理
 

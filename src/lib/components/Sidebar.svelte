@@ -9,20 +9,20 @@
     sessions = [],
     activeSessionId = null,
     sidebarCollapsed = false,
-    oncreate = () => {},
-    onselect = (_sid: string) => {},
-    onupdatetitle = (_sid: string, _title: string) => {},
-    ondelete = (_sid: string) => {},
-    onsettings = () => {},
+    onCreate = () => {},
+    onSelect = (_sid: string) => {},
+    onUpdateTitle = (_sid: string, _title: string) => {},
+    onDelete = (_sid: string) => {},
+    onSettings = () => {},
   }: {
     sessions: SessionInfo[];
     activeSessionId: string | null;
     sidebarCollapsed: boolean;
-    oncreate: () => void;
-    onselect: (sid: string) => void;
-    onupdatetitle: (sid: string, title: string) => void;
-    ondelete: (sid: string) => void;
-    onsettings: () => void;
+    onCreate: () => void;
+    onSelect: (sid: string) => void;
+    onUpdateTitle: (sid: string, title: string) => void;
+    onDelete: (sid: string) => void;
+    onSettings: () => void;
   } = $props();
 
   let editingSessionId = $state<string | null>(null);
@@ -40,7 +40,7 @@
 
   function commitEdit() {
     if (editingSessionId && editTitle.trim()) {
-      onupdatetitle(editingSessionId, editTitle.trim());
+      onUpdateTitle(editingSessionId, editTitle.trim());
     }
     editingSessionId = null;
     editTitle = "";
@@ -78,7 +78,7 @@
 <aside class="sidebar" class:collapsed={sidebarCollapsed}>
   <div class="sidebar-inner">
     <div class="sidebar-header">
-      <button class="btn-new-chat" onclick={oncreate} title="新建会话">
+      <button class="btn-new-chat" onclick={onCreate} title="新建会话">
         <svg
           width="20"
           height="20"
@@ -103,7 +103,7 @@
           <button
             class="session-item"
             class:active={s.session_id === activeSessionId}
-            onclick={() => onselect(s.session_id)}
+            onclick={() => onSelect(s.session_id)}
             ondblclick={() => startEdit(s.session_id, s.title)}
           >
             <svg
@@ -140,13 +140,13 @@
               tabindex="0"
               onclick={(e) => {
                 e.stopPropagation();
-                ondelete(s.session_id);
+                onDelete(s.session_id);
               }}
               onkeydown={(e) => {
                 if (e.key === 'Enter' || e.key === ' ') {
                   e.preventDefault();
                   e.stopPropagation();
-                  ondelete(s.session_id);
+                  onDelete(s.session_id);
                 }
               }}
             >
@@ -172,7 +172,7 @@
     </div>
 
     <div class="sidebar-footer">
-      <button class="btn-settings" onclick={onsettings} title="设置">
+      <button class="btn-settings" onclick={onSettings} title="设置">
         <svg
           width="18"
           height="18"

@@ -6,8 +6,8 @@
     confirmText = "确认删除",
     cancelText = "取消",
     danger = false,
-    onconfirm = () => {},
-    oncancel = () => {},
+    onConfirm = () => {},
+    onCancel = () => {},
   }: {
     show: boolean;
     title: string;
@@ -15,15 +15,15 @@
     confirmText: string;
     cancelText: string;
     danger: boolean;
-    onconfirm: () => void;
-    oncancel: () => void;
+    onConfirm: () => void;
+    onCancel: () => void;
   } = $props();
 
   function handleKeydown(e: KeyboardEvent) {
     if (e.key === "Escape") {
-      oncancel();
+      onCancel();
     } else if (e.key === "Enter") {
-      onconfirm();
+      onConfirm();
     }
   }
 </script>
@@ -35,7 +35,7 @@
   <div
     class="confirm-overlay"
     role="presentation"
-    onclick={oncancel}
+    onclick={onCancel}
   >
     <!-- svelte-ignore a11y_click_events_have_key_events -->
     <div
@@ -48,7 +48,7 @@
         <h2>{title}</h2>
         <button
           class="btn-close"
-          onclick={oncancel}
+          onclick={onCancel}
           title="关闭"
         >
           <svg
@@ -70,11 +70,11 @@
         <button
           class="btn-confirm"
           class:danger
-          onclick={onconfirm}
+          onclick={onConfirm}
         >
           {confirmText}
         </button>
-        <button class="btn-cancel" onclick={oncancel}>
+        <button class="btn-cancel" onclick={onCancel}>
           {cancelText}
         </button>
       </div>

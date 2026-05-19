@@ -129,7 +129,13 @@
     loadDraft(sid);
 
     const turns = await invoke<
-      { turn_num: number; user_text: string; assistant_text: string; prompt_tokens: number | null; completion_tokens: number | null }[]
+      {
+        turn_num: number;
+        user_text: string;
+        assistant_text: string;
+        prompt_tokens: number | null;
+        completion_tokens: number | null;
+      }[]
     >("get_turns", { sessionId: sid });
 
     messages = [];
@@ -346,11 +352,11 @@
     {sessions}
     {activeSessionId}
     {sidebarCollapsed}
-    oncreate={startNewChat}
-    onselect={selectSession}
-    onupdatetitle={updateSessionTitle}
-    ondelete={(sid) => (sessionToDelete = sid)}
-    onsettings={() => (showSettings = true)}
+    onCreate={startNewChat}
+    onSelect={selectSession}
+    onUpdateTitle={updateSessionTitle}
+    onDelete={(sid) => (sessionToDelete = sid)}
+    onSettings={() => (showSettings = true)}
   />
 
   <!-- Mobile sidebar overlay backdrop -->
@@ -425,8 +431,8 @@
       <ChatInput
         {inputText}
         {sending}
-        oninputtextchange={(val: string) => (inputText = val)}
-        onsend={sendMessage}
+        onInputTextChange={(val: string) => (inputText = val)}
+        onSend={sendMessage}
       />
       {#if contextTokens > 0}
         <div class="token-bar">
@@ -435,12 +441,19 @@
               class="token-fill"
               class:warn={contextTokens > CONTEXT_WINDOW * 0.6}
               class:critical={contextTokens > CONTEXT_WINDOW * 0.9}
-              style="width: {Math.min(100, (contextTokens / CONTEXT_WINDOW) * 100)}%"
+              style="width: {Math.min(
+                100,
+                (contextTokens / CONTEXT_WINDOW) * 100,
+              )}%"
             ></div>
           </div>
-          <span class="token-label" class:warn={contextTokens > CONTEXT_WINDOW * 0.6} class:critical={contextTokens > CONTEXT_WINDOW * 0.9}>
+          <span
+            class="token-label"
+            class:warn={contextTokens > CONTEXT_WINDOW * 0.6}
+            class:critical={contextTokens > CONTEXT_WINDOW * 0.9}
+          >
             {formatNumber(contextTokens)} / {formatNumber(CONTEXT_WINDOW)} tokens
-            ({(contextTokens / CONTEXT_WINDOW * 100).toFixed(1)}%)
+            ({((contextTokens / CONTEXT_WINDOW) * 100).toFixed(1)}%)
           </span>
         </div>
       {/if}
@@ -452,10 +465,10 @@
   show={showSettings}
   {apiKey}
   {loading}
-  onapikeychange={(val: string) => (apiKey = val)}
-  onclose={() => (showSettings = false)}
-  onsave={configureApiKey}
-  onclear={clearAllData}
+  onApiKeyChange={(val: string) => (apiKey = val)}
+  onClose={() => (showSettings = false)}
+  onSave={configureApiKey}
+  onClear={clearAllData}
 />
 
 <ConfirmDialog
@@ -465,10 +478,9 @@
   confirmText="删除"
   cancelText="取消"
   danger={true}
-  onconfirm={confirmDeleteSession}
-  oncancel={() => (sessionToDelete = null)}
+  onConfirm={confirmDeleteSession}
+  onCancel={() => (sessionToDelete = null)}
 />
-
 
 <style>
   /* ── CSS Variables (ChatGPT dark theme) ────────────────── */
@@ -645,10 +657,18 @@
       line-height: 1.4;
     }
 
-    .markdown-body h1 { font-size: 1.5em; }
-    .markdown-body h2 { font-size: 1.3em; }
-    .markdown-body h3 { font-size: 1.15em; }
-    .markdown-body h4 { font-size: 1em; }
+    .markdown-body h1 {
+      font-size: 1.5em;
+    }
+    .markdown-body h2 {
+      font-size: 1.3em;
+    }
+    .markdown-body h3 {
+      font-size: 1.15em;
+    }
+    .markdown-body h4 {
+      font-size: 1em;
+    }
 
     .markdown-body ul,
     .markdown-body ol {

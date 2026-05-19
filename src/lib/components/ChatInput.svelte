@@ -2,13 +2,13 @@
   let {
     inputText = "",
     sending = false,
-    oninputtextchange = (_val: string) => {},
-    onsend = () => {},
+    onInputTextChange = (_val: string) => {},
+    onSend = () => {},
   }: {
     inputText: string;
     sending: boolean;
-    oninputtextchange: (val: string) => void;
-    onsend: () => void;
+    onInputTextChange: (val: string) => void;
+    onSend: () => void;
   } = $props();
 
   let textareaEl: HTMLTextAreaElement;
@@ -24,7 +24,7 @@
     if (e.isComposing || e.keyCode === 229) return;
     if (e.key === "Enter" && !e.shiftKey) {
       e.preventDefault();
-      onsend();
+      onSend();
     }
   }
 
@@ -36,7 +36,7 @@
 
   function onInput(e: Event) {
     autoResize(e);
-    oninputtextchange((e.target as HTMLTextAreaElement).value);
+    onInputTextChange((e.target as HTMLTextAreaElement).value);
   }
 </script>
 
@@ -53,7 +53,7 @@
     ></textarea>
     <button
       class="btn-send"
-      onclick={onsend}
+      onclick={onSend}
       disabled={!inputText.trim() || sending}
       title="发送"
     >

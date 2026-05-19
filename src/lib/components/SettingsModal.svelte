@@ -3,18 +3,18 @@
     show = false,
     apiKey = "",
     loading = false,
-    onapikeychange = (_val: string) => {},
-    onclose = () => {},
-    onsave = () => {},
-    onclear = () => {},
+    onApiKeyChange = (_val: string) => {},
+    onClose = () => {},
+    onSave = () => {},
+    onClear = () => {},
   }: {
     show: boolean;
     apiKey: string;
     loading: boolean;
-    onapikeychange: (val: string) => void;
-    onclose: () => void;
-    onsave: () => void;
-    onclear: () => void;
+    onApiKeyChange: (val: string) => void;
+    onClose: () => void;
+    onSave: () => void;
+    onClear: () => void;
   } = $props();
 
   type View = "menu" | "apikey" | "clear-data";
@@ -33,7 +33,7 @@
   <div
     class="settings-overlay"
     role="presentation"
-    onclick={onclose}
+    onclick={onClose}
   >
     <!-- svelte-ignore a11y_click_events_have_key_events -->
     <div
@@ -51,7 +51,7 @@
           </button>
         {/if}
         <h2>设置</h2>
-        <button class="btn-close" onclick={onclose} title="关闭">
+        <button class="btn-close" onclick={onClose} title="关闭">
           <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round">
             <line x1="18" y1="6" x2="6" y2="18"></line>
             <line x1="6" y1="6" x2="18" y2="18"></line>
@@ -87,13 +87,13 @@
           <input
             type="password"
             value={apiKey}
-            oninput={(e) => onapikeychange((e.target as HTMLInputElement).value)}
+            oninput={(e) => onApiKeyChange((e.target as HTMLInputElement).value)}
             placeholder="sk-..."
             disabled={loading}
           />
         </label>
         <div class="settings-actions">
-          <button class="btn-primary" onclick={onsave} disabled={loading}>
+          <button class="btn-primary" onclick={onSave} disabled={loading}>
             {loading ? "配置中..." : "保存"}
           </button>
           <button class="btn-cancel" onclick={() => (view = "menu")}>取消</button>
@@ -103,7 +103,7 @@
         {#if clearConfirm}
           <p class="confirm-message">确定要清除所有数据吗？这将删除所有聊天记录、会话标题和 API Key 配置，重置应用到初始状态。此操作无法撤销。</p>
           <div class="settings-actions">
-            <button class="btn-danger" onclick={onclear}>确认清除</button>
+            <button class="btn-danger" onclick={onClear}>确认清除</button>
             <button class="btn-cancel" onclick={() => (clearConfirm = false)}>取消</button>
           </div>
         {:else}
