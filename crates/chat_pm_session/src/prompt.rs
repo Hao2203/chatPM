@@ -1,8 +1,5 @@
 use crate::{
-    language::Language,
-    memory::Memory,
-    message::{ChatMessage, UserInput},
-    session::SessionId,
+    language::Language, memory::Memory, message::{ChatMessage, UserInput}, session::SessionId,
     summarization::Summary,
 };
 
@@ -48,7 +45,7 @@ impl PromptComposer {
         Self { system_prompt }
     }
 
-    pub fn compose_prompt(&self, ctx: Context, user_input: UserInput) -> Vec<ChatMessage> {
+    pub fn compose_prompt(&self, ctx: Context, user_input: &UserInput) -> Vec<ChatMessage> {
         let mut messages = if ctx.recent_memory.is_empty() {
             vec![self.system_prompt.to_message()]
         } else {
@@ -65,7 +62,7 @@ impl PromptComposer {
             messages.push(user_msg);
         }
 
-        messages.push(ChatMessage::user(user_input.into_inner()));
+        messages.push(ChatMessage::user(user_input.as_str()));
 
         messages
     }
@@ -80,13 +77,13 @@ impl PromptComposer {
 /// [`NewSession`]: crate::session::NewSession
 /// [`Session`]: crate::session::Session
 #[derive(Debug, Clone)]
-pub struct TitlePrompt {
+pub struct TitlePrompt<'a> {
     session_id: SessionId,
-    user_input: String,
+    user_input: &'a str,
 }
 
-impl TitlePrompt {
-    pub fn new(session_id: SessionId, user_input: String) -> Self {
+impl<'a> TitlePrompt<'a> {
+    pub fn new(session_id: SessionId, user_input: &'a str) -> Self {
         Self {
             session_id,
             user_input,
@@ -101,7 +98,7 @@ impl TitlePrompt {
     pub fn compose(&self) -> Vec<ChatMessage> {
         vec![
             ChatMessage::system(Self::system_prompt()),
-            ChatMessage::user(Self::user_prompt(&self.user_input)),
+            ChatMessage::user(Self::user_prompt(self.user_input)),
         ]
     }
 

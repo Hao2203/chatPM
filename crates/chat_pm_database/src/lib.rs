@@ -434,10 +434,10 @@ impl MemoryDb {
 // ── TurnRecord → Memory ─────────────────────────────────────────────
 
 impl TurnRecord {
-    pub fn to_memory_chunk(&self) -> Memory {
+    pub fn to_memory_chunk(self) -> Memory {
         Memory {
-            user_text: self.user_text.clone(),
-            assistant_text: self.assistant_text.clone(),
+            user_text: self.user_text,
+            assistant_text: self.assistant_text,
         }
     }
 }

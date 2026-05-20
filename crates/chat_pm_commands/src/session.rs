@@ -159,7 +159,7 @@ impl ChatService {
     /// `TitlePrompt` → `Session`：调用 LLM 生成标题，持久化后转入正式会话。
     ///
     /// 消耗 `TitlePrompt`，确保标题生成只发生一次。
-    pub async fn finalize_session(&self, tp: TitlePrompt) -> Result<Session, CommandError> {
+    pub async fn finalize_session(&self, tp: TitlePrompt<'_>) -> Result<Session, CommandError> {
         let session_id = tp.session_id();
         let messages = tp.compose();
 
@@ -233,7 +233,7 @@ impl ChatService {
             recent_memory,
         };
         let composer = PromptComposer::new(system_prompt);
-        let messages = composer.compose_prompt(ctx, user_input.clone());
+        let messages = composer.compose_prompt(ctx, &user_input);
         debug!(msgs = messages.len(), "Prompt 组装完成");
 
         let mut stream = self
@@ -292,7 +292,7 @@ impl ChatService {
             // 保存轮次到 DB
             if let Err(e) = db.append_chat_turn(
                 &sid,
-                user_input.into(),
+                user_input.into_inner(),
                 assistant_text,
                 Some(prompt_tokens_result as i64),
                 Some(completion_tokens_result as i64),

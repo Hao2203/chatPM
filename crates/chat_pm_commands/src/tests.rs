@@ -43,25 +43,22 @@ async fn demo() -> Result<()> {
         println!("轮次 {} 用户：{}", i + 1, user_text);
         println!("{}", "─".repeat(60));
 
-        let user_input = UserInput::new(user_text);
-
-        let s = if i == 0 {
+        if i == 0 {
             // 首轮：NewSession → TitlePrompt → finalize → Session
-            let tp = new_session.take().unwrap().into_title_prompt(UserInput::new(user_text));
+            let title_input = UserInput::new(user_text);
+            let tp = new_session.take().unwrap().into_title_prompt(&title_input);
             let s = service.finalize_session(tp).await?;
             println!("标题已生成：{}", s.title());
-            s
-        } else {
-            session.clone().unwrap()
-        };
+            session = Some(s);
+        }
 
-        let mut stream = service.chat(&s, user_input).await?;
+        let s = session.as_ref().unwrap();
+        let mut stream = service.chat(s, UserInput::new(user_text)).await?;
         print!("助手：");
         while let Some(Ok(frame)) = stream.recv().await {
             print(&frame.content);
         }
         println!();
-        session = Some(s);
     }
 
     // ── 3. 模拟跨请求恢复 ──────────────────────────────────────

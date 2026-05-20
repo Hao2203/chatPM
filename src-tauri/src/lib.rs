@@ -129,7 +129,7 @@ async fn send_message(
         )) => {
             // 无标题或会话不存在 → 走 TitlePrompt → Session 流程
             let new_session = NewSession::with_id(session_id);
-            let tp = new_session.into_title_prompt(user_input.clone());
+            let tp = new_session.into_title_prompt(&user_input);
             let session = service.finalize_session(tp).await?;
 
             let _ = app.emit(
@@ -184,7 +184,7 @@ async fn send_message(
         let _ = app_handle.emit(
             "chat-done",
             ChatDonePayload {
-                session_id: sid_str.clone(),
+                session_id: sid_str,
                 prompt_tokens,
                 completion_tokens,
             },
@@ -260,8 +260,6 @@ fn clear_all_data(app: tauri::AppHandle, state: State<'_, AppState>) -> Result<(
     // 1. Drop service
     *state.service.try_lock().map_err(|_| AppError::locked())? = None;
 
-    let db_path = state.db_path.clone();
-
     // 2. Drop old db connection
     let placeholder = MemoryDb::open_in_memory().map_err(AppError::from)?;
     let old_db = {
@@ -271,12 +269,12 @@ fn clear_all_data(app: tauri::AppHandle, state: State<'_, AppState>) -> Result<(
     drop(old_db);
 
     // 3. Delete database files (ignore not-found errors)
-    let _ = std::fs::remove_file(&db_path);
-    let _ = std::fs::remove_file(db_path.with_extension("db-wal"));
-    let _ = std::fs::remove_file(db_path.with_extension("db-shm"));
+    let _ = std::fs::remove_file(&state.db_path);
+    let _ = std::fs::remove_file(state.db_path.with_extension("db-wal"));
+    let _ = std::fs::remove_file(state.db_path.with_extension("db-shm"));
 
     // 4. Create fresh database
-    let new_db = MemoryDb::open(&db_path).map_err(AppError::from)?;
+    let new_db = MemoryDb::open(&state.db_path).map_err(AppError::from)?;
     *state.db.try_lock().map_err(|_| AppError::locked())? = new_db;
 
     // 5. Emit event

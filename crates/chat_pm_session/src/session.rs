@@ -1,4 +1,4 @@
-use crate::prompt::TitlePrompt;
+use crate::{message::UserInput, prompt::TitlePrompt};
 use uuid::Uuid;
 
 // ── Session identity ─────────────────────────────────────────────────
@@ -83,8 +83,8 @@ impl NewSession {
     /// 转入标题生成阶段，消耗自身。
     ///
     /// `NewSession` → `TitlePrompt`
-    pub fn into_title_prompt(self, user_input: crate::message::UserInput) -> TitlePrompt {
-        TitlePrompt::new(self.session_id, user_input.into_inner())
+    pub fn into_title_prompt(self, user_input: &UserInput) -> TitlePrompt<'_> {
+        TitlePrompt::new(self.session_id, user_input.as_str())
     }
 }
 
