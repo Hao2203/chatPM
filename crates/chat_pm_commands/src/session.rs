@@ -1,5 +1,5 @@
 use anyhow::Result as AnyhowResult;
-use chat_pm_database::{DbError, MemoryDb};
+use chat_pm_database::{DbError, ChatDb};
 use chat_pm_deepseek::{ApiError, ChatRequestConfig, Client as DeepseekClient, ReasoningEffort};
 use tokio::sync::mpsc;
 use tracing::{debug, info};
@@ -123,13 +123,13 @@ fn summary_request_config(model: &str) -> ChatRequestConfig {
 #[derive(Clone)]
 pub struct ChatService {
     client: DeepseekClient,
-    db: MemoryDb,
+    db: ChatDb,
     config: ChatConfig,
 }
 
 impl ChatService {
     pub fn new(
-        db: MemoryDb,
+        db: ChatDb,
         client: DeepseekClient,
         config: ChatConfig,
     ) -> Result<Self, CommandError> {
@@ -137,7 +137,7 @@ impl ChatService {
         Ok(Self { client, db, config })
     }
 
-    pub fn with_default_deepseek(db: MemoryDb, config: ChatConfig) -> Result<Self, CommandError> {
+    pub fn with_default_deepseek(db: ChatDb, config: ChatConfig) -> Result<Self, CommandError> {
         let client = DeepseekClient::from_env()?;
         Self::new(db, client, config)
     }
@@ -149,7 +149,7 @@ impl ChatService {
     /// 数据库记录已写入，但标题尚未生成。
     pub fn create_session(&self) -> Result<NewSession, CommandError> {
         let session_id = SessionId::new();
-        self.db.create_session(&session_id.to_string())?;
+        self.db.create_session(session_id)?;
         info!(%session_id, "新会话已创建");
         Ok(NewSession::with_id(session_id))
     }
@@ -169,29 +169,26 @@ impl ChatService {
             .await?;
 
         let title = clean_title(&raw_title);
-        let sid = session_id.to_string();
-        self.db.set_session_title(&sid, title.as_str())?;
-        info!(session_id = %sid, %title, "会话标题已生成");
+        self.db.set_session_title(session_id, title.as_str())?;
+        info!(session_id = %session_id, %title, "会话标题已生成");
         Ok(Session::resume(session_id, title))
     }
 
     /// 从持久化记录恢复 `Session`（仅限已有标题的会话）。
     pub fn resume_session(&self, session_id: SessionId) -> Result<Session, CommandError> {
-        let sid = session_id.to_string();
         let record = self
             .db
-            .get_session(&sid)?
-            .ok_or(ChatError::SessionNotFound(sid.clone()))?;
-        let title = record.title.ok_or(ChatError::TitleNotGenerated(sid))?;
+            .get_session(session_id)?
+            .ok_or(ChatError::SessionNotFound(session_id.to_string()))?;
+        let title = record.title.ok_or(ChatError::TitleNotGenerated(session_id.to_string()))?;
         Ok(Session::resume(session_id, Title::new(title)))
     }
 
     /// 删除会话及其所有聊天记录。
     pub fn delete_session(&self, session_id: SessionId) -> Result<bool, CommandError> {
-        let sid = session_id.to_string();
-        let deleted = self.db.delete_session(&sid)?;
+        let deleted = self.db.delete_session(session_id)?;
         if deleted {
-            info!(%sid, "会话已删除");
+            info!(%session_id, "会话已删除");
         }
         Ok(deleted)
     }
@@ -206,13 +203,13 @@ impl ChatService {
         session: &Session,
         user_input: UserInput,
     ) -> Result<mpsc::Receiver<Result<MessageFrame, ApiError>>, CommandError> {
-        let sid = session.session_id().to_string();
+        let sid = session.session_id();
         info!(%sid, "开始处理");
 
         // 载入摘要（如有）
         let summary = self
             .db
-            .get_summary(&sid)?
+            .get_summary(sid)?
             .map(|(content, last_turn_num)| Summary {
                 content,
                 last_turn_id: chat_pm_session::TurnId::new(last_turn_num as u64),
@@ -220,7 +217,7 @@ impl ChatService {
 
         let recent_memory = self
             .db
-            .load_recent_memory(&sid, self.config.short_term_turns)?;
+            .load_recent_memory(sid, self.config.short_term_turns)?;
         debug!(count = recent_memory.len(), "短期记忆加载完成");
 
         let system_prompt = SystemPrompt {
@@ -291,7 +288,7 @@ impl ChatService {
 
             // 保存轮次到 DB
             if let Err(e) = db.append_chat_turn(
-                &sid,
+                sid,
                 user_input.into_inner(),
                 assistant_text,
                 Some(prompt_tokens_result as i64),
@@ -318,7 +315,7 @@ impl ChatService {
                 prompt_tokens_result,
                 config.context_window,
                 config.summary_ratio,
-            ) && let Err(e) = summarize_session_inner(&db, &client, &config, &sid).await
+            ) && let Err(e) = summarize_session_inner(&db, &client, &config, sid).await
             {
                 tracing::error!(%sid, error = %e, "摘要生成失败");
             }
@@ -329,18 +326,17 @@ impl ChatService {
 
     /// 手动触发指定会话的摘要压缩（对外暴露，也可用于测试）。
     pub async fn summarize_session(&self, session_id: SessionId) -> Result<(), CommandError> {
-        let sid = session_id.to_string();
-        summarize_session_inner(&self.db, &self.client, &self.config, &sid).await
+        summarize_session_inner(&self.db, &self.client, &self.config, session_id).await
     }
 }
 
 // ── Standalone summarization function (usable inside tokio::spawn) ─────
 
 async fn summarize_session_inner(
-    db: &MemoryDb,
+    db: &ChatDb,
     client: &DeepseekClient,
     config: &ChatConfig,
-    sid: &str,
+    sid: SessionId,
 ) -> Result<(), CommandError> {
     let total_turns = db.count_turns(sid)?;
     let existing = db.get_summary(sid)?;

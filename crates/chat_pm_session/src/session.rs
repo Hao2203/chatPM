@@ -4,7 +4,7 @@ use uuid::Uuid;
 // ── Session identity ─────────────────────────────────────────────────
 
 /// 会话唯一标识符。
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub struct SessionId(Uuid);
 
 impl SessionId {

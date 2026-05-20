@@ -136,8 +136,8 @@ CREATE TABLE config (
 
 | 方法 | 说明 |
 |---|---|
-| `MemoryDb::open(path)` | 打开/创建持久化 SQLite 文件 |
-| `MemoryDb::open_in_memory()` | 打开内存数据库（测试用） |
+| `ChatDb::open(path)` | 打开/创建持久化 SQLite 文件 |
+| `ChatDb::open_in_memory()` | 打开内存数据库（测试用） |
 | `create_session(session_id)` | 插入新会话 |
 | `session_exists(session_id) -> bool` | 检查是否存在 |
 | `get_session(session_id) -> Option<SessionRecord>` | 获取完整记录（含标题） |
@@ -225,7 +225,7 @@ create_session() → NewSession
 
 ```rust
 struct AppState {
-    db: MemoryDb,                          // 持久化 SQLite
+    db: ChatDb,                          // 持久化 SQLite
     pipeline: Mutex<Option<ChatPipeline>>,  // 设置 API key 后初始化
 }
 ```
@@ -353,7 +353,7 @@ pub enum DbError {
 pub type DbResult<T> = Result<T, DbError>;
 ```
 
-- `MemoryDb` 所有公共方法返回 `DbResult<T>`
+- `ChatDb` 所有公共方法返回 `DbResult<T>`
 - `lock_conn()` 私有方法封装 `Mutex::lock()`，返回 `DbResult<MutexGuard<_>>`
 
 **`PipelineError`（`crates/chat_pm_commands/src/session.rs`）— 命令层统一错误：**
@@ -447,7 +447,7 @@ emit("chat-done")
 ### Rust 后端
 集成测试在 `crates/chat_pm_commands/src/tests.rs` 中 — 集成测试（`demo`）：
 1. 从 `.env` 加载 `DEEPSEEK_API_KEY`
-2. 创建 `MemoryDb::open_in_memory()` + `ChatPipeline`
+2. 创建 `ChatDb::open_in_memory()` + `ChatPipeline`
 3. 运行多轮对话
 4. 模拟跨"HTTP 请求"的会话恢复
 

@@ -1,5 +1,5 @@
 use chat_pm_commands::session::{ChatConfig, ChatService, CommandError};
-use chat_pm_database::MemoryDb;
+use chat_pm_database::ChatDb;
 use chat_pm_session::{
     message::UserInput,
     session::{NewSession, SessionId},
@@ -15,7 +15,7 @@ use error::{AppError, ErrorKind};
 // ── State ───────────────────────────────────────────────────────────
 
 struct AppState {
-    db: std::sync::Mutex<MemoryDb>,
+    db: std::sync::Mutex<ChatDb>,
     db_path: std::path::PathBuf,
     service: Mutex<Option<ChatService>>,
 }
@@ -65,7 +65,7 @@ struct TurnInfo {
 // ── Helper ──────────────────────────────────────────────────────────
 
 /// Try to build a ChatService from a stored API key string.
-fn build_service(db: &MemoryDb, raw_key: &str) -> Result<ChatService, AppError> {
+fn build_service(db: &ChatDb, raw_key: &str) -> Result<ChatService, AppError> {
     let key = chat_pm_deepseek::ApiKey::new(raw_key)
         .ok_or_else(|| AppError::new(ErrorKind::Validation, "无效的 API Key"))?;
     let client = chat_pm_deepseek::Client::new(key);
@@ -201,7 +201,7 @@ fn list_sessions(state: State<'_, AppState>) -> Result<Vec<SessionInfo>, AppErro
     Ok(sessions
         .into_iter()
         .map(|s| SessionInfo {
-            session_id: s.session_id,
+            session_id: s.session_id.to_string(),
             created_at: s.created_at.to_rfc3339(),
             title: s.title,
         })
@@ -211,7 +211,11 @@ fn list_sessions(state: State<'_, AppState>) -> Result<Vec<SessionInfo>, AppErro
 #[tauri::command]
 fn get_turns(state: State<'_, AppState>, session_id: String) -> Result<Vec<TurnInfo>, AppError> {
     let db = state.db.try_lock().map_err(|_| AppError::locked())?;
-    let turns = db.recent_turns(&session_id, 1000)?;
+    let sid = SessionId::from_uuid(
+        uuid::Uuid::parse_str(&session_id)
+            .map_err(|e| AppError::new(ErrorKind::Validation, format!("无效的会话 ID: {e}")))?,
+    );
+    let turns = db.recent_turns(sid, 1000)?;
     let infos: Vec<TurnInfo> = turns
         .into_iter()
         .map(|t| TurnInfo {
@@ -233,7 +237,11 @@ fn update_session_title(
     title: String,
 ) -> Result<(), AppError> {
     let db = state.db.try_lock().map_err(|_| AppError::locked())?;
-    db.set_session_title(&session_id, &title)?;
+    let sid = SessionId::from_uuid(
+        uuid::Uuid::parse_str(&session_id)
+            .map_err(|e| AppError::new(ErrorKind::Validation, format!("无效的会话 ID: {e}")))?,
+    );
+    db.set_session_title(sid, &title)?;
     drop(db);
     let _ = app.emit(
         "session-title-updated",
@@ -249,7 +257,11 @@ fn delete_session(
     session_id: String,
 ) -> Result<(), AppError> {
     let db = state.db.try_lock().map_err(|_| AppError::locked())?;
-    db.delete_session(&session_id)?;
+    let sid = SessionId::from_uuid(
+        uuid::Uuid::parse_str(&session_id)
+            .map_err(|e| AppError::new(ErrorKind::Validation, format!("无效的会话 ID: {e}")))?,
+    );
+    db.delete_session(sid)?;
     drop(db);
     let _ = app.emit("session-deleted", SessionDeletedPayload { session_id });
     Ok(())
@@ -261,7 +273,7 @@ fn clear_all_data(app: tauri::AppHandle, state: State<'_, AppState>) -> Result<(
     *state.service.try_lock().map_err(|_| AppError::locked())? = None;
 
     // 2. Drop old db connection
-    let placeholder = MemoryDb::open_in_memory().map_err(AppError::from)?;
+    let placeholder = ChatDb::open_in_memory().map_err(AppError::from)?;
     let old_db = {
         let mut guard = state.db.try_lock().map_err(|_| AppError::locked())?;
         std::mem::replace(&mut *guard, placeholder)
@@ -274,7 +286,7 @@ fn clear_all_data(app: tauri::AppHandle, state: State<'_, AppState>) -> Result<(
     let _ = std::fs::remove_file(state.db_path.with_extension("db-shm"));
 
     // 4. Create fresh database
-    let new_db = MemoryDb::open(&state.db_path).map_err(AppError::from)?;
+    let new_db = ChatDb::open(&state.db_path).map_err(AppError::from)?;
     *state.db.try_lock().map_err(|_| AppError::locked())? = new_db;
 
     // 5. Emit event
@@ -297,7 +309,7 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
             std::fs::create_dir_all(&data_dir)?;
             let db_path = data_dir.join("chatpm.db");
 
-            let db = MemoryDb::open(&db_path)?;
+            let db = ChatDb::open(&db_path)?;
             tracing::info!(path = %db_path.display(), "数据库已打开");
 
             // Try to restore API key from previous session

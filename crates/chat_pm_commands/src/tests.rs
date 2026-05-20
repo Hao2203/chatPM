@@ -8,7 +8,7 @@ use logforth::{
 };
 
 use crate::session::{ChatService, ChatConfig};
-use chat_pm_database::MemoryDb;
+use chat_pm_database::ChatDb;
 
 #[tokio::test]
 async fn demo() -> Result<()> {
@@ -18,7 +18,7 @@ async fn demo() -> Result<()> {
         .apply();
     dotenvy::dotenv()?;
 
-    let db = MemoryDb::open_in_memory()?;
+    let db = ChatDb::open_in_memory()?;
     let config = ChatConfig::default();
     let service = ChatService::with_default_deepseek(db, config)?;
 

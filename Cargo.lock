@@ -514,6 +514,7 @@ dependencies = [
  "rusqlite",
  "serde",
  "thiserror 2.0.18",
+ "uuid",
 ]
 
 [[package]]
@@ -536,6 +537,7 @@ name = "chat_pm_session"
 version = "0.1.0"
 dependencies = [
  "derive_more",
+ "serde",
  "thiserror 2.0.18",
  "uuid",
 ]
@@ -3265,6 +3267,7 @@ dependencies = [
  "hashlink",
  "libsqlite3-sys",
  "smallvec",
+ "uuid",
 ]
 
 [[package]]
