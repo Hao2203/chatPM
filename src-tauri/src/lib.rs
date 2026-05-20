@@ -1,16 +1,16 @@
-use chat_pm_commands::session::{ChatService, ChatConfig, CommandError};
+use chat_pm_commands::session::{ChatConfig, ChatService, CommandError};
 use chat_pm_database::MemoryDb;
 use chat_pm_session::{
-    ChatError,
     message::UserInput,
     session::{NewSession, SessionId},
+    ChatError,
 };
 use serde::Serialize;
 use tauri::{Emitter, Manager, State};
 use tokio::sync::Mutex;
 
 mod error;
-use error::AppError;
+use error::{AppError, ErrorKind};
 
 // ── State ───────────────────────────────────────────────────────────
 
@@ -67,7 +67,7 @@ struct TurnInfo {
 /// Try to build a ChatService from a stored API key string.
 fn build_service(db: &MemoryDb, raw_key: &str) -> Result<ChatService, AppError> {
     let key = chat_pm_deepseek::ApiKey::new(raw_key)
-        .ok_or_else(|| AppError::new("validation", "无效的 API Key"))?;
+        .ok_or_else(|| AppError::new(ErrorKind::Validation, "无效的 API Key"))?;
     let client = chat_pm_deepseek::Client::new(key);
     let config = ChatConfig::default();
     ChatService::new(db.clone(), client, config).map_err(AppError::from)
@@ -83,13 +83,8 @@ async fn check_api_key(state: State<'_, AppState>) -> Result<bool, AppError> {
 
 #[tauri::command]
 fn create_session(state: State<'_, AppState>) -> Result<String, AppError> {
-    let guard = state
-        .service
-        .try_lock()
-        .map_err(|_| AppError::locked())?;
-    let service = guard
-        .as_ref()
-        .ok_or_else(AppError::not_configured)?;
+    let guard = state.service.try_lock().map_err(|_| AppError::locked())?;
+    let service = guard.as_ref().ok_or_else(AppError::not_configured)?;
     let new_session = service.create_session().map_err(AppError::from)?;
     Ok(new_session.session_id().to_string())
 }
@@ -101,10 +96,7 @@ fn set_api_key(state: State<'_, AppState>, api_key: String) -> Result<(), AppErr
     db.set_config("api_key", &api_key)?;
     drop(db);
 
-    let mut guard = state
-        .service
-        .try_lock()
-        .map_err(|_| AppError::locked())?;
+    let mut guard = state.service.try_lock().map_err(|_| AppError::locked())?;
     *guard = Some(service);
 
     tracing::info!("API key 已配置并持久化");
@@ -120,14 +112,12 @@ async fn send_message(
 ) -> Result<(), AppError> {
     let service = {
         let guard = state.service.lock().await;
-        guard
-            .clone()
-            .ok_or_else(AppError::not_configured)?
+        guard.clone().ok_or_else(AppError::not_configured)?
     };
 
     let session_id = SessionId::from_uuid(
         uuid::Uuid::parse_str(&session_id)
-            .map_err(|e| AppError::new("validation", format!("无效的会话 ID: {e}")))?,
+            .map_err(|e| AppError::new(ErrorKind::Validation, format!("无效的会话 ID: {e}")))?,
     );
     let user_input = UserInput::new(&content);
 
@@ -247,10 +237,7 @@ fn update_session_title(
     drop(db);
     let _ = app.emit(
         "session-title-updated",
-        SessionTitlePayload {
-            session_id,
-            title,
-        },
+        SessionTitlePayload { session_id, title },
     );
     Ok(())
 }
@@ -264,10 +251,7 @@ fn delete_session(
     let db = state.db.try_lock().map_err(|_| AppError::locked())?;
     db.delete_session(&session_id)?;
     drop(db);
-    let _ = app.emit(
-        "session-deleted",
-        SessionDeletedPayload { session_id },
-    );
+    let _ = app.emit("session-deleted", SessionDeletedPayload { session_id });
     Ok(())
 }
 
@@ -296,7 +280,8 @@ fn clear_all_data(app: tauri::AppHandle, state: State<'_, AppState>) -> Result<(
     *state.db.try_lock().map_err(|_| AppError::locked())? = new_db;
 
     // 5. Emit event
-    app.emit("data-cleared", ()).map_err(|e| AppError::new("internal", e.to_string()))?;
+    app.emit("data-cleared", ())
+        .map_err(|e| AppError::new(ErrorKind::Internal, e.to_string()))?;
 
     tracing::info!("所有数据已清除，数据库已重建");
     Ok(())
