@@ -24,6 +24,7 @@
   // ── State ──────────────────────────────────────────────────
   let apiKey = $state("");
   let apiKeyConfigured = $state(false);
+  let model = $state("deepseek-v4-flash");
   let showSettings = $state(false);
   let loading = $state(false);
   let sidebarCollapsed = $state(false);
@@ -178,6 +179,19 @@
     }
   }
 
+  // ── Configure model ────────────────────────────────────────
+  async function configureModel(newModel: string) {
+    model = newModel;
+    loading = true;
+    try {
+      await invoke("set_model", { model: newModel });
+    } catch (e: any) {
+      alert("模型切换失败：" + getErrorMessage(e));
+    } finally {
+      loading = false;
+    }
+  }
+
   // ── Clear all data ─────────────────────────────────────────
   async function clearAllData() {
     try {
@@ -279,6 +293,9 @@
     invoke<boolean>("check_api_key").then((ok) => {
       apiKeyConfigured = ok;
     });
+    invoke<string>("get_model").then((m) => {
+      model = m;
+    });
     loadSessions();
 
     // Listen for title updates (AI-generated or manual)
@@ -325,6 +342,7 @@
       const unlisten = await listen("data-cleared", () => {
         apiKeyConfigured = false;
         apiKey = "";
+        model = "deepseek-v4-flash";
         showSettings = false;
         sessions = [];
         activeSessionId = null;
@@ -464,8 +482,10 @@
 <SettingsModal
   show={showSettings}
   {apiKey}
+  {model}
   {loading}
   onApiKeyChange={(val: string) => (apiKey = val)}
+  onModelChange={configureModel}
   onClose={() => (showSettings = false)}
   onSave={configureApiKey}
   onClear={clearAllData}

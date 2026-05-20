@@ -64,12 +64,22 @@ struct TurnInfo {
 
 // ── Helper ──────────────────────────────────────────────────────────
 
-/// Try to build a ChatService from a stored API key string.
+/// Supported models for the UI to present.
+const SUPPORTED_MODELS: &[&str] = &["deepseek-v4-flash", "deepseek-v4-pro"];
+const DEFAULT_MODEL: &str = "deepseek-v4-flash";
+
+/// Try to build a ChatService from a stored API key string, optionally with a stored model.
 fn build_service(db: &ChatDb, raw_key: &str) -> Result<ChatService, AppError> {
     let key = chat_pm_deepseek::ApiKey::new(raw_key)
         .ok_or_else(|| AppError::new(ErrorKind::Validation, "无效的 API Key"))?;
     let client = chat_pm_deepseek::Client::new(key);
-    let config = ChatConfig::default();
+    let model = db
+        .get_config("model")
+        .ok()
+        .flatten()
+        .unwrap_or_else(|| DEFAULT_MODEL.to_string());
+    let mut config = ChatConfig::default();
+    config.set_chat_model(&model);
     ChatService::new(db.clone(), client, config).map_err(AppError::from)
 }
 
@@ -100,6 +110,47 @@ fn set_api_key(state: State<'_, AppState>, api_key: String) -> Result<(), AppErr
     *guard = Some(service);
 
     tracing::info!("API key 已配置并持久化");
+    Ok(())
+}
+
+#[tauri::command]
+fn get_model(state: State<'_, AppState>) -> Result<String, AppError> {
+    let db = state.db.try_lock().map_err(|_| AppError::locked())?;
+    Ok(db
+        .get_config("model")
+        .ok()
+        .flatten()
+        .unwrap_or_else(|| DEFAULT_MODEL.to_string()))
+}
+
+#[tauri::command]
+fn set_model(state: State<'_, AppState>, model: String) -> Result<(), AppError> {
+    let model = model.trim().to_ascii_lowercase();
+    if !SUPPORTED_MODELS.contains(&model.as_str()) {
+        return Err(AppError::new(
+            ErrorKind::Validation,
+            format!(
+                "不支持的模型 '{}'，可选：{}",
+                model,
+                SUPPORTED_MODELS.join(", ")
+            ),
+        ));
+    }
+
+    let db = state.db.try_lock().map_err(|_| AppError::locked())?;
+    db.set_config("model", &model)?;
+
+    // If service already exists, rebuild with new model
+    if let Some(raw_key) = db.get_config("api_key").ok().flatten() {
+        let service = build_service(&db, &raw_key)?;
+        drop(db);
+        let mut guard = state.service.try_lock().map_err(|_| AppError::locked())?;
+        *guard = Some(service);
+    } else {
+        drop(db);
+    }
+
+    tracing::info!(%model, "模型已切换");
     Ok(())
 }
 
@@ -335,6 +386,8 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
             check_api_key,
             create_session,
             set_api_key,
+            get_model,
+            set_model,
             send_message,
             list_sessions,
             get_turns,

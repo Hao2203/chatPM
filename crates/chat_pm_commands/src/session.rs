@@ -57,6 +57,10 @@ impl ChatConfig {
         Ok(())
     }
 
+    pub fn set_chat_model(&mut self, model: &str) {
+        self.chat_model = model.to_string();
+    }
+
     pub fn set_reasoning_effort_from_str(&mut self, value: &str) -> AnyhowResult<()> {
         self.reasoning_effort = Some(ReasoningEffort::parse(value)?);
         Ok(())

@@ -2,22 +2,26 @@
   let {
     show = false,
     apiKey = "",
+    model = "deepseek-v4-flash",
     loading = false,
     onApiKeyChange = (_val: string) => {},
+    onModelChange = (_val: string) => {},
     onClose = () => {},
     onSave = () => {},
     onClear = () => {},
   }: {
     show: boolean;
     apiKey: string;
+    model: string;
     loading: boolean;
     onApiKeyChange: (val: string) => void;
+    onModelChange: (val: string) => void;
     onClose: () => void;
     onSave: () => void;
     onClear: () => void;
   } = $props();
 
-  type View = "menu" | "apikey" | "clear-data";
+  type View = "menu" | "apikey" | "model" | "clear-data";
   let view = $state<View>("menu");
   let clearConfirm = $state(false);
 
@@ -26,6 +30,11 @@
     if (show) view = "menu";
     clearConfirm = false;
   });
+
+  const MODEL_OPTIONS = [
+    { value: "deepseek-v4-flash", label: "DeepSeek V4 Flash" },
+    { value: "deepseek-v4-pro", label: "DeepSeek V4 Pro" },
+  ];
 </script>
 
 {#if show}
@@ -70,6 +79,15 @@
               <polyline points="9 18 15 12 9 6"></polyline>
             </svg>
           </button>
+          <button class="menu-item" onclick={() => (view = "model")}>
+            <div class="menu-item-text">
+              <span class="menu-item-title">模型选择</span>
+              <span class="menu-item-desc">当前：{MODEL_OPTIONS.find(o => o.value === model)?.label ?? model}</span>
+            </div>
+            <svg class="menu-item-chevron" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round">
+              <polyline points="9 18 15 12 9 6"></polyline>
+            </svg>
+          </button>
           <button class="menu-item" onclick={() => (view = "clear-data")}>
             <div class="menu-item-text">
               <span class="menu-item-title">清除所有数据</span>
@@ -97,6 +115,23 @@
             {loading ? "配置中..." : "保存"}
           </button>
           <button class="btn-cancel" onclick={() => (view = "menu")}>取消</button>
+        </div>
+
+      {:else if view === "model"}
+        <div class="model-select-label">
+          <span>选择模型</span>
+          <select
+            value={model}
+            onchange={(e) => onModelChange((e.target as HTMLSelectElement).value)}
+            disabled={loading}
+          >
+            {#each MODEL_OPTIONS as opt}
+              <option value={opt.value}>{opt.label}</option>
+            {/each}
+          </select>
+        </div>
+        <div class="settings-actions">
+          <button class="btn-cancel" onclick={() => (view = "menu")}>返回</button>
         </div>
 
       {:else if view === "clear-data"}
@@ -273,6 +308,41 @@
 
   .setting-label input:disabled {
     opacity: 0.5;
+  }
+
+  .model-select-label {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    font-size: 14px;
+    color: var(--text-secondary);
+    margin-bottom: 20px;
+  }
+
+  .model-select-label select {
+    padding: 10px 36px 10px 14px;
+    border-radius: var(--radius);
+    border: 1px solid var(--border-color);
+    background: var(--bg-primary);
+    color: var(--text-primary);
+    font-size: 14px;
+    outline: none;
+    cursor: pointer;
+    transition: border-color 0.15s;
+    appearance: none;
+    background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 24 24' fill='none' stroke='%238e8ea0' stroke-width='2.5' stroke-linecap='round'%3E%3Cpolyline points='6 9 12 15 18 9'%3E%3C/polyline%3E%3C/svg%3E");
+    background-repeat: no-repeat;
+    background-position: right 12px center;
+    background-size: 12px;
+  }
+
+  .model-select-label select:focus {
+    border-color: var(--accent);
+  }
+
+  .model-select-label select:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
   }
 
   .settings-actions {
