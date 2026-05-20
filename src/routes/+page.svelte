@@ -413,6 +413,74 @@
       </svg>
     </button>
 
+    {#if contextTokens > 0}
+      {@const pct = Math.min(100, (contextTokens / CONTEXT_WINDOW) * 100)}
+      {@const color = pct > 90 ? "var(--danger)" : pct > 60 ? "#eab308" : "var(--accent)"}
+      {@const r = 13}
+      {@const circumference = 2 * Math.PI * r}
+      {@const dashOffset = circumference * (1 - pct / 100)}
+      <div class="token-ring-wrapper" title="">
+        <svg
+          class="token-ring"
+          width="34"
+          height="34"
+          viewBox="0 0 34 34"
+        >
+          <!-- background circle -->
+          <circle
+            cx="17"
+            cy="17"
+            r={r}
+            fill="none"
+            stroke="var(--border-color)"
+            stroke-width="3"
+          />
+          <!-- progress arc -->
+          <circle
+            cx="17"
+            cy="17"
+            r={r}
+            fill="none"
+            stroke={color}
+            stroke-width="3"
+            stroke-linecap="round"
+            stroke-dasharray={circumference}
+            stroke-dashoffset={dashOffset}
+            transform="rotate(-90 17 17)"
+            style="transition: stroke-dashoffset 0.4s ease, stroke 0.3s ease;"
+          />
+          <!-- percentage text in center -->
+          <text
+            x="17"
+            y="18"
+            text-anchor="middle"
+            dominant-baseline="middle"
+            fill={color}
+            font-size="8"
+            font-weight="600"
+            style="transition: fill 0.3s ease;"
+          >
+            {Math.round(pct)}%
+          </text>
+        </svg>
+        <!-- hover tooltip -->
+        <div class="token-tooltip">
+          <div class="token-tooltip-row">
+            <span>已使用</span>
+            <span>{formatNumber(contextTokens)}</span>
+          </div>
+          <div class="token-tooltip-row">
+            <span>总容量</span>
+            <span>{formatNumber(CONTEXT_WINDOW)}</span>
+          </div>
+          <div class="token-tooltip-row">
+            <span>占比</span>
+            <span>{pct.toFixed(1)}%</span>
+          </div>
+        </div>
+      </div>
+    {/if}
+
     {#if !apiKeyConfigured}
       <div class="apikey-warning">
         <div class="apikey-warning-card">
@@ -452,29 +520,7 @@
         onInputTextChange={(val: string) => (inputText = val)}
         onSend={sendMessage}
       />
-      {#if contextTokens > 0}
-        <div class="token-bar">
-          <div class="token-bar-inner">
-            <div
-              class="token-fill"
-              class:warn={contextTokens > CONTEXT_WINDOW * 0.6}
-              class:critical={contextTokens > CONTEXT_WINDOW * 0.9}
-              style="width: {Math.min(
-                100,
-                (contextTokens / CONTEXT_WINDOW) * 100,
-              )}%"
-            ></div>
-          </div>
-          <span
-            class="token-label"
-            class:warn={contextTokens > CONTEXT_WINDOW * 0.6}
-            class:critical={contextTokens > CONTEXT_WINDOW * 0.9}
-          >
-            {formatNumber(contextTokens)} / {formatNumber(CONTEXT_WINDOW)} tokens
-            ({((contextTokens / CONTEXT_WINDOW) * 100).toFixed(1)}%)
-          </span>
-        </div>
-      {/if}
+
     {/if}
   </div>
 </div>
@@ -561,6 +607,7 @@
     overflow-x: hidden;
   }
 
+  /* ── Sidebar toggle ──────────────────────────────────── */
   .btn-toggle-sidebar {
     position: absolute;
     top: 10px;
@@ -841,70 +888,72 @@
       width: 30px;
       height: 30px;
     }
+
+    .token-ring-wrapper {
+      top: 6px;
+      right: 6px;
+      width: 30px;
+      height: 30px;
+    }
   }
 
-  /* ── Token Bar ──────────────────────────────────────────── */
-  .token-bar {
+  /* ── Token Ring ────────────────────────────────────────── */
+
+  .token-ring-wrapper {
+    position: absolute;
+    top: 10px;
+    right: 10px;
+    z-index: 10;
     display: flex;
     align-items: center;
-    gap: 10px;
-    max-width: 820px;
-    width: 100%;
-    margin: 0 auto;
-    padding: 4px 40px 6px;
-    box-sizing: border-box;
+    justify-content: center;
+    width: 34px;
+    height: 34px;
+    border-radius: 50%;
+    cursor: pointer;
   }
 
-  @media (max-width: 900px) {
-    .token-bar {
-      padding: 4px 20px 6px;
-    }
+  .token-ring-wrapper:hover {
+    background: var(--bg-hover);
   }
 
-  @media (max-width: 768px) {
-    .token-bar {
-      padding: 2px 12px 4px;
-      max-width: 100%;
-    }
+  .token-ring {
+    display: block;
   }
 
-  .token-bar-inner {
-    flex: 1;
-    height: 4px;
-    background: var(--border-color);
-    border-radius: 2px;
-    overflow: hidden;
-    min-width: 0;
-  }
-
-  .token-fill {
-    height: 100%;
-    background: var(--accent);
-    border-radius: 2px;
-    transition: width 0.3s ease;
-  }
-
-  .token-fill.warn {
-    background: #eab308;
-  }
-
-  .token-fill.critical {
-    background: var(--danger);
-  }
-
-  .token-label {
-    font-size: 11px;
-    color: var(--text-muted);
+  /* Tooltip */
+  .token-tooltip {
+    position: absolute;
+    top: calc(100% + 8px);
+    right: 0;
+    background: var(--bg-secondary);
+    border: 1px solid var(--border-color);
+    border-radius: var(--radius);
+    padding: 10px 14px;
     white-space: nowrap;
+    pointer-events: none;
+    opacity: 0;
+    transition: opacity 0.15s ease;
+    z-index: 20;
+    box-shadow: 0 4px 16px rgba(0, 0, 0, 0.3);
+  }
+
+  .token-ring-wrapper:hover .token-tooltip {
+    opacity: 1;
+  }
+
+  .token-tooltip-row {
+    display: flex;
+    justify-content: space-between;
+    gap: 16px;
+    font-size: 12px;
+    line-height: 1.8;
+    color: var(--text-secondary);
+  }
+
+  .token-tooltip-row span:last-child {
     font-family: var(--font-mono);
-    transition: color 0.3s ease;
-  }
-
-  .token-label.warn {
-    color: #eab308;
-  }
-
-  .token-label.critical {
-    color: var(--danger);
+    color: var(--text-primary);
+    font-weight: 500;
   }
 </style>
