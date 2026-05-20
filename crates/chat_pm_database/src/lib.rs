@@ -15,7 +15,7 @@ use uuid::Uuid;
 const SCHEMA_SQL: &str = "
 CREATE TABLE IF NOT EXISTS sessions (
     session_id  TEXT PRIMARY KEY,
-    created_at  TEXT NOT NULL,
+    created_at  INTEGER NOT NULL,
     title        TEXT,
     user_persona TEXT
 );
@@ -26,7 +26,7 @@ CREATE TABLE IF NOT EXISTS turns (
     turn_num     INTEGER NOT NULL,
     user_text    TEXT NOT NULL,
     assistant_text TEXT NOT NULL,
-    created_at   TEXT NOT NULL,
+    created_at   INTEGER NOT NULL,
     FOREIGN KEY (session_id) REFERENCES sessions(session_id),
     UNIQUE(session_id, turn_num)
 );
@@ -40,7 +40,7 @@ CREATE TABLE IF NOT EXISTS summaries (
     session_id    TEXT PRIMARY KEY,
     content       TEXT NOT NULL,
     last_turn_num INTEGER NOT NULL,
-    created_at    TEXT NOT NULL,
+    created_at    INTEGER NOT NULL,
     FOREIGN KEY (session_id) REFERENCES sessions(session_id)
 );
 ";
@@ -171,7 +171,7 @@ impl ChatDb {
                  user_persona = excluded.user_persona",
             params![
                 record.session_id.as_uuid(),
-                record.created_at.to_rfc3339(),
+                record.created_at.timestamp(),
                 record.title,
                 record.user_persona,
             ],
@@ -186,11 +186,11 @@ impl ChatDb {
                 "SELECT session_id, created_at, title, user_persona FROM sessions WHERE session_id = ?1",
                 params![session_id.as_uuid()],
                 |row| {
-                    let created_at: String = row.get(1)?;
+                    let created_at: i64 = row.get(1)?;
                     let sid: Uuid = row.get(0)?;
                     Ok(SessionRecord {
                         session_id: SessionId::from_uuid(sid),
-                        created_at: parse_rfc3339(&created_at)?,
+                        created_at: from_sql_timestamp(created_at)?,
                         title: row.get(2)?,
                         user_persona: row.get(3)?,
                     })
@@ -205,11 +205,11 @@ impl ChatDb {
             "SELECT session_id, created_at, title, user_persona FROM sessions ORDER BY created_at DESC",
         )?;
         let rows = stmt.query_map([], |row| {
-            let created_at: String = row.get(1)?;
+            let created_at: i64 = row.get(1)?;
             let sid: Uuid = row.get(0)?;
             Ok(SessionRecord {
                 session_id: SessionId::from_uuid(sid),
-                created_at: parse_rfc3339(&created_at)?,
+                created_at: from_sql_timestamp(created_at)?,
                 title: row.get(2)?,
                 user_persona: row.get(3)?,
             })
@@ -269,7 +269,7 @@ impl ChatDb {
                 record.turn_id.get(),
                 record.user_text,
                 record.assistant_text,
-                record.created_at.to_rfc3339(),
+                record.created_at.timestamp(),
                 record.prompt_tokens,
                 record.completion_tokens,
             ],
@@ -289,14 +289,14 @@ impl ChatDb {
 
         let mut rows: Vec<TurnRecord> = stmt
             .query_map(params![session_id.as_uuid(), n as i64], |row| {
-                let created_at: String = row.get(4)?;
+                let created_at: i64 = row.get(4)?;
                 let sid: Uuid = row.get(1)?;
                 Ok(TurnRecord {
                     turn_id: TurnId::new(row.get::<_, i64>(0)? as u64),
                     session_id: SessionId::from_uuid(sid),
                     user_text: row.get(2)?,
                     assistant_text: row.get(3)?,
-                    created_at: parse_rfc3339(&created_at)?,
+                    created_at: from_sql_timestamp(created_at)?,
                     prompt_tokens: row.get(5)?,
                     completion_tokens: row.get(6)?,
                 })
@@ -342,7 +342,12 @@ impl ChatDb {
                  content = excluded.content,
                  last_turn_num = excluded.last_turn_num,
                  created_at = excluded.created_at",
-            params![session_id.as_uuid(), content, last_turn_num, Utc::now().to_rfc3339()],
+            params![
+                session_id.as_uuid(),
+                content,
+                last_turn_num,
+                Utc::now().timestamp()
+            ],
         )?;
         Ok(())
     }
@@ -386,12 +391,15 @@ impl ChatDb {
         )?;
 
         let rows = stmt
-            .query_map(params![session_id.as_uuid(), from as i64, to as i64], |row| {
-                Ok(Memory {
-                    user_text: row.get(1)?,
-                    assistant_text: row.get(2)?,
-                })
-            })?
+            .query_map(
+                params![session_id.as_uuid(), from as i64, to as i64],
+                |row| {
+                    Ok(Memory {
+                        user_text: row.get(1)?,
+                        assistant_text: row.get(2)?,
+                    })
+                },
+            )?
             .collect::<Result<Vec<_>, _>>()?;
 
         Ok(rows)
@@ -448,17 +456,18 @@ impl TurnRecord {
 
 // ── Helpers ──────────────────────────────────────────────────────────
 
-/// 解析 RFC 3339 日期字符串（用于 in-row-closure 场景，返回 `rusqlite::Error`）。
-fn parse_rfc3339(s: &str) -> Result<DateTime<Utc>, rusqlite::Error> {
-    DateTime::parse_from_rfc3339(s)
-        .map(|ts| ts.with_timezone(&Utc))
-        .map_err(|e| {
-            rusqlite::Error::FromSqlConversionFailure(
-                0,
-                rusqlite::types::Type::Text,
-                Box::new(e),
-            )
-        })
+/// 从 SQLite INTEGER 时间戳（秒）解析 `DateTime<Utc>`（用于 in-row-closure 场景）。
+fn from_sql_timestamp(secs: i64) -> Result<DateTime<Utc>, rusqlite::Error> {
+    DateTime::from_timestamp(secs, 0).ok_or_else(|| {
+        rusqlite::Error::FromSqlConversionFailure(
+            0,
+            rusqlite::types::Type::Integer,
+            Box::new(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!("invalid unix timestamp: {secs}"),
+            )),
+        )
+    })
 }
 
 /// 将 `QueryReturnedNoRows` 转换为 `None`，其他错误正常传播。
