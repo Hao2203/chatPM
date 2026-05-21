@@ -72,7 +72,7 @@ const DEFAULT_MODEL: &str = "deepseek-v4-flash";
 /// Try to build a ChatService from a stored API key string, optionally with a stored model.
 fn build_service(db: &ChatDb, raw_key: &str) -> Result<ChatService, AppError> {
     let key = chat_pm_deepseek::ApiKey::new(raw_key)
-        .ok_or_else(|| AppError::new(ErrorKind::Validation, "无效的 API Key"))?;
+        .ok_or_else(|| AppError::new(ErrorKind::Validation, "Invalid API key"))?;
     let client = chat_pm_deepseek::Client::new(key);
     let model = db
         .get_config("model")
@@ -110,7 +110,7 @@ fn set_api_key(state: State<'_, AppState>, api_key: String) -> Result<(), AppErr
     let mut guard = state.service.try_lock().map_err(|_| AppError::locked())?;
     *guard = Some(service);
 
-    tracing::info!("API key 已配置并持久化");
+    tracing::info!("API key configured and persisted");
     Ok(())
 }
 
@@ -131,7 +131,7 @@ fn set_model(state: State<'_, AppState>, model: String) -> Result<(), AppError> 
         return Err(AppError::new(
             ErrorKind::Validation,
             format!(
-                "不支持的模型 '{}'，可选：{}",
+                "Unsupported model '{}', available: {}",
                 model,
                 SUPPORTED_MODELS.join(", ")
             ),
@@ -151,7 +151,7 @@ fn set_model(state: State<'_, AppState>, model: String) -> Result<(), AppError> 
         drop(db);
     }
 
-    tracing::info!(%model, "模型已切换");
+    tracing::info!(%model, "Model switched");
     Ok(())
 }
 
@@ -169,7 +169,7 @@ async fn send_message(
 
     let session_id = SessionId::from_uuid(
         uuid::Uuid::parse_str(&session_id)
-            .map_err(|e| AppError::new(ErrorKind::Validation, format!("无效的会话 ID: {e}")))?,
+            .map_err(|e| AppError::new(ErrorKind::Validation, format!("Invalid session ID: {e}")))?,
     );
     let user_input = UserInput::new(&content);
 
@@ -265,7 +265,7 @@ fn get_turns(state: State<'_, AppState>, session_id: String) -> Result<Vec<TurnI
     let db = state.db.try_lock().map_err(|_| AppError::locked())?;
     let sid = SessionId::from_uuid(
         uuid::Uuid::parse_str(&session_id)
-            .map_err(|e| AppError::new(ErrorKind::Validation, format!("无效的会话 ID: {e}")))?,
+            .map_err(|e| AppError::new(ErrorKind::Validation, format!("Invalid session ID: {e}")))?,
     );
     let turns = db.recent_turns(sid, 1000)?;
     let infos: Vec<TurnInfo> = turns
@@ -292,7 +292,7 @@ fn update_session_title(
     let db = state.db.try_lock().map_err(|_| AppError::locked())?;
     let sid = SessionId::from_uuid(
         uuid::Uuid::parse_str(&session_id)
-            .map_err(|e| AppError::new(ErrorKind::Validation, format!("无效的会话 ID: {e}")))?,
+            .map_err(|e| AppError::new(ErrorKind::Validation, format!("Invalid session ID: {e}")))?,
     );
     db.set_session_title(sid, &title)?;
     drop(db);
@@ -312,7 +312,7 @@ fn delete_session(
     let db = state.db.try_lock().map_err(|_| AppError::locked())?;
     let sid = SessionId::from_uuid(
         uuid::Uuid::parse_str(&session_id)
-            .map_err(|e| AppError::new(ErrorKind::Validation, format!("无效的会话 ID: {e}")))?,
+            .map_err(|e| AppError::new(ErrorKind::Validation, format!("Invalid session ID: {e}")))?,
     );
     db.delete_session(sid)?;
     drop(db);
@@ -346,7 +346,7 @@ fn clear_all_data(app: tauri::AppHandle, state: State<'_, AppState>) -> Result<(
     app.emit("data-cleared", ())
         .map_err(|e| AppError::new(ErrorKind::Internal, e.to_string()))?;
 
-    tracing::info!("所有数据已清除，数据库已重建");
+    tracing::info!("All data cleared, database rebuilt");
     Ok(())
 }
 
@@ -363,7 +363,7 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
             let db_path = data_dir.join("chatpm.db");
 
             let db = ChatDb::open(&db_path)?;
-            tracing::info!(path = %db_path.display(), "数据库已打开");
+            tracing::info!(path = %db_path.display(), "Database opened");
 
             // Try to restore API key from previous session
             let service = db
@@ -373,7 +373,7 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
                 .and_then(|raw_key| build_service(&db, &raw_key).ok());
 
             if service.is_some() {
-                tracing::info!("已从数据库恢复 API key");
+                tracing::info!("API key restored from database");
             }
 
             app.manage(AppState {

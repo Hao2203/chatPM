@@ -54,11 +54,11 @@ impl AppError {
     }
 
     pub fn locked() -> Self {
-        Self::new(ErrorKind::Locked, "资源暂不可用，请稍后重试")
+        Self::new(ErrorKind::Locked, "Resource temporarily unavailable, please try again later")
     }
 
     pub fn not_configured() -> Self {
-        Self::new(ErrorKind::Validation, "请先配置 API Key")
+        Self::new(ErrorKind::Validation, "Please configure your API key first")
     }
 }
 

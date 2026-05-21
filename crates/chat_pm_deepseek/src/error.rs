@@ -4,15 +4,15 @@
 /// 不是业务逻辑约束的违反。
 #[derive(Debug, thiserror::Error)]
 pub enum ApiError {
-    #[error("API 请求发送失败: {0}")]
+    #[error("API request failed: {0}")]
     RequestFailed(String),
 
-    #[error("API 返回错误状态: {0}")]
+    #[error("API returned error status: {0}")]
     ErrorStatus(String),
 
-    #[error("API 响应解析失败: {0}")]
+    #[error("API response parse failed: {0}")]
     ParseFailed(String),
 
-    #[error("模型未返回任何 choice")]
+    #[error("Model returned no choices")]
     NoChoice,
 }

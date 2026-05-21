@@ -154,7 +154,7 @@ impl ChatService {
     pub fn create_session(&self) -> Result<NewSession, CommandError> {
         let session_id = SessionId::new();
         self.db.create_session(session_id)?;
-        info!(%session_id, "新会话已创建");
+        info!(%session_id, "New session created");
         Ok(NewSession::with_id(session_id))
     }
 
@@ -174,7 +174,7 @@ impl ChatService {
 
         let title = clean_title(&raw_title);
         self.db.set_session_title(session_id, title.as_str())?;
-        info!(session_id = %session_id, %title, "会话标题已生成");
+        info!(session_id = %session_id, %title, "Session title generated");
         Ok(Session::resume(session_id, title))
     }
 
@@ -194,7 +194,7 @@ impl ChatService {
     pub fn delete_session(&self, session_id: SessionId) -> Result<bool, CommandError> {
         let deleted = self.db.delete_session(session_id)?;
         if deleted {
-            info!(%session_id, "会话已删除");
+            info!(%session_id, "Session deleted");
         }
         Ok(deleted)
     }
@@ -210,7 +210,7 @@ impl ChatService {
         user_input: UserInput,
     ) -> Result<mpsc::Receiver<Result<MessageFrame, ApiError>>, CommandError> {
         let sid = session.session_id();
-        info!(%sid, "开始处理");
+        info!(%sid, "Processing started");
 
         // 载入摘要（如有）
         let summary = self
@@ -225,7 +225,7 @@ impl ChatService {
         let recent_memory = self
             .db
             .load_recent_memory(sid, self.config.short_term_turns)?;
-        debug!(count = recent_memory.len(), "短期记忆加载完成");
+        debug!(count = recent_memory.len(), "Short-term memory loaded");
 
         let system_prompt = SystemPrompt {
             role_description: Some(self.config.system_role.clone()),
@@ -238,7 +238,7 @@ impl ChatService {
         };
         let composer = PromptComposer::new(system_prompt);
         let messages = composer.compose_prompt(ctx, &user_input);
-        debug!(msgs = messages.len(), "Prompt 组装完成");
+        debug!(msgs = messages.len(), "Prompt assembled");
 
         let mut stream = self
             .client
@@ -301,7 +301,7 @@ impl ChatService {
                 Some(prompt_tokens_result as i64),
                 Some(completion_tokens_result as i64),
             ) {
-                tracing::error!(%sid, error = %e, "保存聊天记录失败");
+                tracing::error!(%sid, error = %e, "Failed to save chat record");
             }
 
             // 发送最后一帧携带 token 信息（在保存之后，确保前端收到时数据已持久化）
@@ -324,7 +324,7 @@ impl ChatService {
                 config.summary_ratio,
             ) && let Err(e) = summarize_session_inner(&db, &client, &config, sid).await
             {
-                tracing::error!(%sid, error = %e, "摘要生成失败");
+                tracing::error!(%sid, error = %e, "Summary generation failed");
             }
         });
 
@@ -378,7 +378,7 @@ async fn summarize_session_inner(
 
     let trimmed_content = new_content.trim().to_string();
     if trimmed_content.is_empty() {
-        tracing::warn!(%sid, "摘要生成为空，跳过更新");
+        tracing::warn!(%sid, "Summary generation produced empty result, skipping update");
         return Ok(());
     }
 
@@ -389,6 +389,6 @@ async fn summarize_session_inner(
         plan.new_last_turn_num as i64,
         turn_uuid,
     )?;
-    info!(%sid, last_turn_num = plan.new_last_turn_num, "摘要已更新");
+    info!(%sid, last_turn_num = plan.new_last_turn_num, "Summary updated");
     Ok(())
 }

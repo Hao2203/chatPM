@@ -90,11 +90,11 @@ pub struct DbStats {
 
 #[derive(Debug, thiserror::Error)]
 pub enum DbError {
-    #[error("数据库锁已污染")]
+    #[error("Database lock poisoned")]
     Lock,
-    #[error("SQL 错误: {0}")]
+    #[error("SQL error: {0}")]
     Sql(#[from] rusqlite::Error),
-    #[error("日期解析失败: {0}")]
+    #[error("Date parse failed: {0}")]
     DateParse(String),
 }
 

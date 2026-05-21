@@ -3,7 +3,7 @@
 
 fn main() {
     if let Err(e) = chatpm_lib::run() {
-        eprintln!("应用启动失败: {e}");
+        eprintln!("Application failed to start: {e}");
         std::process::exit(1);
     }
 }

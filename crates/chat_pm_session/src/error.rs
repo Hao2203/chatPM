@@ -4,15 +4,15 @@
 /// 而不是基础设施故障（例如数据库连接断开）。
 #[derive(Debug, Clone, thiserror::Error)]
 pub enum ChatError {
-    #[error("会话 '{0}' 不存在")]
+    #[error("Session '{0}' not found")]
     SessionNotFound(String),
 
-    #[error("会话 '{0}' 尚未生成标题，无法恢复")]
+    #[error("Session '{0}' has no title generated, cannot resume")]
     TitleNotGenerated(String),
 
-    #[error("未配置 API Key")]
+    #[error("API key not configured")]
     ApiKeyNotConfigured,
 
-    #[error("无效的 API Key")]
+    #[error("Invalid API key")]
     InvalidApiKey,
 }
