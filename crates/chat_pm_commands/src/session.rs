@@ -1,5 +1,5 @@
 use anyhow::Result as AnyhowResult;
-use chat_pm_database::{DbError, ChatDb};
+use chat_pm_database::{ChatDb, DbError};
 use chat_pm_deepseek::{ApiError, ChatRequestConfig, Client as DeepseekClient, ReasoningEffort};
 use tokio::sync::mpsc;
 use tracing::{debug, info};
@@ -184,7 +184,9 @@ impl ChatService {
             .db
             .get_session(session_id)?
             .ok_or(ChatError::SessionNotFound(session_id.to_string()))?;
-        let title = record.title.ok_or(ChatError::TitleNotGenerated(session_id.to_string()))?;
+        let title = record
+            .title
+            .ok_or(ChatError::TitleNotGenerated(session_id.to_string()))?;
         Ok(Session::resume(session_id, Title::new(title)))
     }
 
@@ -214,9 +216,10 @@ impl ChatService {
         let summary = self
             .db
             .get_summary(sid)?
-            .map(|(content, last_turn_num)| Summary {
+            .map(|(content, last_turn_uuid, last_turn_num)| Summary {
                 content,
-                last_turn_id: chat_pm_session::TurnId::new(last_turn_num as u64),
+                last_turn_id: chat_pm_session::TurnId::from_uuid(last_turn_uuid),
+                last_turn_num: last_turn_num as u64,
             });
 
         let recent_memory = self
@@ -344,9 +347,10 @@ async fn summarize_session_inner(
 ) -> Result<(), CommandError> {
     let total_turns = db.count_turns(sid)?;
     let existing = db.get_summary(sid)?;
-    let existing_summary = existing.as_ref().map(|(c, last_num)| Summary {
+    let existing_summary = existing.as_ref().map(|(c, last_uuid, last_num)| Summary {
         content: c.clone(),
-        last_turn_id: chat_pm_session::TurnId::new(*last_num as u64),
+        last_turn_id: chat_pm_session::TurnId::from_uuid(*last_uuid),
+        last_turn_num: *last_num as u64,
     });
 
     let plan = match summarization::plan_summarization(
@@ -365,7 +369,7 @@ async fn summarize_session_inner(
         return Ok(());
     }
 
-    let prompt = SummaryPrompt::new(existing.map(|(c, _)| c), new_turns);
+    let prompt = SummaryPrompt::new(existing.as_ref().map(|(c, _, _)| c.clone()), new_turns);
     let messages = prompt.compose();
 
     let new_content = client
@@ -378,7 +382,13 @@ async fn summarize_session_inner(
         return Ok(());
     }
 
-    db.upsert_summary(sid, &trimmed_content, plan.new_last_turn_num as i64)?;
+    let turn_uuid = db.turn_id_by_num(sid, plan.new_last_turn_num)?.as_uuid();
+    db.upsert_summary(
+        sid,
+        &trimmed_content,
+        plan.new_last_turn_num as i64,
+        turn_uuid,
+    )?;
     info!(%sid, last_turn_num = plan.new_last_turn_num, "摘要已更新");
     Ok(())
 }

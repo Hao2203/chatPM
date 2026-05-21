@@ -1,13 +1,24 @@
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-pub struct TurnId(u64);
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+pub struct TurnId(uuid::Uuid);
 
 impl TurnId {
-    pub fn new(v: u64) -> Self {
-        Self(v)
+    /// 生成新的 TurnId（UUID v7，时间有序，无需数据库）。
+    pub fn generate() -> Self {
+        Self(uuid::Uuid::now_v7())
     }
 
-    pub fn get(&self) -> u64 {
+    pub fn from_uuid(uuid: uuid::Uuid) -> Self {
+        Self(uuid)
+    }
+
+    pub fn as_uuid(&self) -> uuid::Uuid {
         self.0
+    }
+}
+
+impl std::fmt::Display for TurnId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.0)
     }
 }
 

@@ -55,6 +55,7 @@ struct SessionInfo {
 
 #[derive(Debug, Clone, Serialize)]
 struct TurnInfo {
+    turn_uuid: String,
     turn_num: u64,
     user_text: String,
     assistant_text: String,
@@ -270,7 +271,8 @@ fn get_turns(state: State<'_, AppState>, session_id: String) -> Result<Vec<TurnI
     let infos: Vec<TurnInfo> = turns
         .into_iter()
         .map(|t| TurnInfo {
-            turn_num: t.turn_id.get(),
+            turn_uuid: t.turn_id.to_string(),
+            turn_num: t.turn_num,
             user_text: t.user_text,
             assistant_text: t.assistant_text,
             prompt_tokens: t.prompt_tokens,
