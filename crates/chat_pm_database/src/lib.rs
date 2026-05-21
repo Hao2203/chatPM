@@ -8,6 +8,7 @@ use rusqlite::{Connection, params};
 use serde::{Deserialize, Serialize};
 
 use chat_pm_session::{chat::TurnId, memory::Memory, session::SessionId};
+use chat_pm_sync::DeviceId;
 use uuid::Uuid;
 
 // ── Schema ──────────────────────────────────────────────────────────
@@ -28,6 +29,8 @@ CREATE TABLE IF NOT EXISTS turns (
     user_text    TEXT NOT NULL,
     assistant_text TEXT NOT NULL,
     created_at   INTEGER NOT NULL,
+    local_seq_no INTEGER NOT NULL DEFAULT 0,
+    device_id   BLOB,
     FOREIGN KEY (session_id) REFERENCES sessions(session_id),
     UNIQUE(session_id, turn_num),
     UNIQUE(turn_uuid)
@@ -46,6 +49,12 @@ CREATE TABLE IF NOT EXISTS summaries (
     created_at      INTEGER NOT NULL,
     FOREIGN KEY (session_id) REFERENCES sessions(session_id)
 );
+
+CREATE TABLE IF NOT EXISTS devices (
+    device_id   BLOB PRIMARY KEY,
+    name        TEXT,
+    created_at  INTEGER NOT NULL
+);
 ";
 
 const MIGRATE_V1_SQL: &str = "
@@ -58,6 +67,11 @@ ALTER TABLE turns ADD COLUMN turn_uuid TEXT;
 ALTER TABLE summaries ADD COLUMN last_turn_uuid TEXT;
 ";
 
+const MIGRATE_V3_SQL: &str = "
+ALTER TABLE turns ADD COLUMN local_seq_no INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE turns ADD COLUMN device_id BLOB;
+";
+
 // ── Domain records ──────────────────────────────────────────────────
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -66,6 +80,13 @@ pub struct SessionRecord {
     pub created_at: DateTime<Utc>,
     pub title: Option<String>,
     pub user_persona: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DeviceRecord {
+    pub device_id: DeviceId,
+    pub name: Option<String>,
+    pub created_at: DateTime<Utc>,
 }
 
 #[derive(Debug, Clone)]
@@ -78,6 +99,8 @@ pub struct TurnRecord {
     pub created_at: DateTime<Utc>,
     pub prompt_tokens: Option<i64>,
     pub completion_tokens: Option<i64>,
+    pub local_seq_no: i64,
+    pub device_id: Option<DeviceId>,
 }
 
 #[derive(Debug)]
@@ -121,6 +144,7 @@ impl ChatDb {
         // Run migrations (ignore errors if columns already exist)
         let _ = conn.execute_batch(MIGRATE_V1_SQL);
         let _ = conn.execute_batch(MIGRATE_V2_SQL);
+        let _ = conn.execute_batch(MIGRATE_V3_SQL);
         Ok(Self {
             conn: Arc::new(Mutex::new(conn)),
         })
@@ -132,6 +156,7 @@ impl ChatDb {
         conn.execute_batch(SCHEMA_SQL)?;
         let _ = conn.execute_batch(MIGRATE_V1_SQL);
         let _ = conn.execute_batch(MIGRATE_V2_SQL);
+        let _ = conn.execute_batch(MIGRATE_V3_SQL);
         Ok(Self {
             conn: Arc::new(Mutex::new(conn)),
         })
@@ -249,6 +274,7 @@ impl ChatDb {
         assistant_text: String,
         prompt_tokens: Option<i64>,
         completion_tokens: Option<i64>,
+        device_id: DeviceId,
     ) -> DbResult<()> {
         let turn_id = TurnId::generate();
         let conn = self.lock_conn()?;
@@ -257,8 +283,13 @@ impl ChatDb {
                 "SELECT COALESCE(MAX(turn_num), 0) + 1 FROM turns WHERE session_id = ?1",
             )?
             .query_row(params![session_id.as_uuid()], |row| row.get(0))?;
+        let local_seq_no: i64 = conn
+            .prepare_cached(
+                "SELECT COALESCE(MAX(local_seq_no), -1) + 1 FROM turns WHERE session_id = ?1",
+            )?
+            .query_row(params![session_id.as_uuid()], |row| row.get(0))?;
         drop(conn);
-        self.append_turn(TurnRecord {
+        self.insert_turn(TurnRecord {
             turn_id,
             turn_num: turn_num as u64,
             session_id,
@@ -267,14 +298,16 @@ impl ChatDb {
             created_at: Utc::now(),
             prompt_tokens,
             completion_tokens,
+            local_seq_no,
+            device_id: Some(device_id),
         })
     }
 
-    pub fn append_turn(&self, record: TurnRecord) -> DbResult<()> {
+    fn insert_turn(&self, record: TurnRecord) -> DbResult<()> {
         let conn = self.lock_conn()?;
         conn.prepare_cached(
-            "INSERT INTO turns (session_id, turn_uuid, turn_num, user_text, assistant_text, created_at, prompt_tokens, completion_tokens)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+            "INSERT INTO turns (session_id, turn_uuid, turn_num, user_text, assistant_text, created_at, prompt_tokens, completion_tokens, local_seq_no, device_id)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
         )?
         .execute(params![
             record.session_id.as_uuid(),
@@ -285,6 +318,8 @@ impl ChatDb {
             record.created_at.timestamp(),
             record.prompt_tokens,
             record.completion_tokens,
+            record.local_seq_no,
+            record.device_id.map(|d| d.as_bytes().to_vec()),
         ])?;
         Ok(())
     }
@@ -292,7 +327,8 @@ impl ChatDb {
     pub fn recent_turns(&self, session_id: SessionId, n: usize) -> DbResult<Vec<TurnRecord>> {
         let conn = self.lock_conn()?;
         let mut stmt = conn.prepare_cached(
-            "SELECT turn_uuid, turn_num, session_id, user_text, assistant_text, created_at, prompt_tokens, completion_tokens
+            "SELECT turn_uuid, turn_num, session_id, user_text, assistant_text, created_at,
+                    prompt_tokens, completion_tokens, local_seq_no, device_id
              FROM turns
              WHERE session_id = ?1
              ORDER BY turn_num DESC
@@ -305,6 +341,7 @@ impl ChatDb {
                 let turn_num: i64 = row.get(1)?;
                 let sid: Uuid = row.get(2)?;
                 let created_at: i64 = row.get(5)?;
+                let device_blob: Option<[u8; 32]> = row.get(9)?;
                 Ok(TurnRecord {
                     turn_id: TurnId::from_uuid(turn_uuid),
                     turn_num: turn_num as u64,
@@ -314,6 +351,8 @@ impl ChatDb {
                     created_at: from_sql_timestamp(created_at)?,
                     prompt_tokens: row.get(6)?,
                     completion_tokens: row.get(7)?,
+                    local_seq_no: row.get::<_, i64>(8)?,
+                    device_id: device_blob.map(DeviceId::from_bytes),
                 })
             })?
             .collect::<Result<Vec<_>, _>>()?;
@@ -387,13 +426,10 @@ impl ChatDb {
     pub fn turn_id_by_num(&self, session_id: SessionId, turn_num: u64) -> DbResult<TurnId> {
         let conn = self.lock_conn()?;
         let uuid: Uuid = conn
-            .prepare_cached(
-                "SELECT turn_uuid FROM turns WHERE session_id = ?1 AND turn_num = ?2",
-            )?
-            .query_row(
-                params![session_id.as_uuid(), turn_num as i64],
-                |row| row.get(0),
-            )?;
+            .prepare_cached("SELECT turn_uuid FROM turns WHERE session_id = ?1 AND turn_num = ?2")?
+            .query_row(params![session_id.as_uuid(), turn_num as i64], |row| {
+                row.get(0)
+            })?;
         Ok(TurnId::from_uuid(uuid))
     }
 
@@ -427,6 +463,90 @@ impl ChatDb {
         Ok(rows)
     }
 
+    // ── Devices ─────────────────────────────────────────────────
+
+    /// 注册一个新设备。
+    pub fn register_device(&self, device_id: DeviceId, name: Option<&str>) -> DbResult<()> {
+        let conn = self.lock_conn()?;
+        conn.prepare_cached(
+            "INSERT INTO devices (device_id, name, created_at) VALUES (?1, ?2, ?3)
+             ON CONFLICT(device_id) DO NOTHING",
+        )?
+        .execute(params![
+            device_id.as_bytes().to_vec(),
+            name,
+            Utc::now().timestamp(),
+        ])?;
+        Ok(())
+    }
+
+    /// 获取已知设备。
+    pub fn get_device(&self, device_id: DeviceId) -> DbResult<Option<DeviceRecord>> {
+        let conn = self.lock_conn()?;
+        let blob = device_id.as_bytes().to_vec();
+        Ok(conn
+            .prepare_cached("SELECT device_id, name, created_at FROM devices WHERE device_id = ?1")?
+            .query_row(params![blob], |row| {
+                let blob: Vec<u8> = row.get(0)?;
+                let bytes: [u8; 32] = blob.try_into().map_err(|v: Vec<u8>| {
+                    rusqlite::Error::FromSqlConversionFailure(
+                        0,
+                        rusqlite::types::Type::Blob,
+                        Box::new(std::io::Error::new(
+                            std::io::ErrorKind::InvalidData,
+                            format!("device_id BLOB 长度应为 32 字节，实际为 {}", v.len()),
+                        )),
+                    )
+                })?;
+                let created_at: i64 = row.get(2)?;
+                Ok(DeviceRecord {
+                    device_id: DeviceId::from_bytes(bytes),
+                    name: row.get(1)?,
+                    created_at: from_sql_timestamp(created_at)?,
+                })
+            })
+            .optional()?)
+    }
+
+    /// 列出所有已知设备。
+    pub fn list_devices(&self) -> DbResult<Vec<DeviceRecord>> {
+        let conn = self.lock_conn()?;
+        let mut stmt = conn.prepare_cached(
+            "SELECT device_id, name, created_at FROM devices ORDER BY created_at DESC",
+        )?;
+        let rows: Result<Vec<DeviceRecord>, rusqlite::Error> = stmt
+            .query_map([], |row| {
+                let blob: Vec<u8> = row.get(0)?;
+                let bytes: [u8; 32] = blob.try_into().map_err(|v: Vec<u8>| {
+                    rusqlite::Error::FromSqlConversionFailure(
+                        0,
+                        rusqlite::types::Type::Blob,
+                        Box::new(std::io::Error::new(
+                            std::io::ErrorKind::InvalidData,
+                            format!("device_id BLOB 长度应为 32 字节，实际为 {}", v.len()),
+                        )),
+                    )
+                })?;
+                let created_at: i64 = row.get(2)?;
+                Ok(DeviceRecord {
+                    device_id: DeviceId::from_bytes(bytes),
+                    name: row.get(1)?,
+                    created_at: from_sql_timestamp(created_at)?,
+                })
+            })?
+            .collect();
+        Ok(rows?)
+    }
+
+    /// 删除设备。
+    pub fn delete_device(&self, device_id: DeviceId) -> DbResult<bool> {
+        let conn = self.lock_conn()?;
+        let rows = conn
+            .prepare_cached("DELETE FROM devices WHERE device_id = ?1")?
+            .execute(params![device_id.as_bytes().to_vec()])?;
+        Ok(rows > 0)
+    }
+
     // ── Config ──────────────────────────────────────────────────
 
     pub fn set_config(&self, key: &str, value: &str) -> DbResult<()> {
@@ -451,12 +571,12 @@ impl ChatDb {
 
     pub fn stats(&self) -> DbResult<DbStats> {
         let conn = self.lock_conn()?;
-        let session_count: usize =
-            conn.prepare_cached("SELECT COUNT(*) FROM sessions")?
-                .query_row([], |row| row.get(0))?;
-        let total_turn_count: usize =
-            conn.prepare_cached("SELECT COUNT(*) FROM turns")?
-                .query_row([], |row| row.get(0))?;
+        let session_count: usize = conn
+            .prepare_cached("SELECT COUNT(*) FROM sessions")?
+            .query_row([], |row| row.get(0))?;
+        let total_turn_count: usize = conn
+            .prepare_cached("SELECT COUNT(*) FROM turns")?
+            .query_row([], |row| row.get(0))?;
         Ok(DbStats {
             session_count,
             total_turn_count,
@@ -506,9 +626,9 @@ impl<T> OptionalExt<T> for Result<T, rusqlite::Error> {
     }
 }
 
-// ── Cosine similarity (向量检索，为未来 RAG 准备) ────────────────────
-
-pub fn cosine_similarity(a: &[f32], b: &[f32]) -> f32 {
+/// ── Cosine similarity (向量检索，为未来 RAG 准备) ────────────────────
+#[allow(dead_code)]
+fn cosine_similarity(a: &[f32], b: &[f32]) -> f32 {
     let len = a.len().min(b.len());
     if len == 0 {
         return 0.0;

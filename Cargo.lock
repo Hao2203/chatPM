@@ -491,6 +491,7 @@ dependencies = [
  "chat_pm_database",
  "chat_pm_deepseek",
  "chat_pm_session",
+ "chat_pm_sync",
  "chrono",
  "dotenvy",
  "futures-lite",
@@ -510,6 +511,7 @@ name = "chat_pm_database"
 version = "0.1.0"
 dependencies = [
  "chat_pm_session",
+ "chat_pm_sync",
  "chrono",
  "rusqlite",
  "serde",
@@ -538,6 +540,16 @@ version = "0.1.0"
 dependencies = [
  "derive_more",
  "serde",
+ "thiserror 2.0.18",
+ "uuid",
+]
+
+[[package]]
+name = "chat_pm_sync"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
  "thiserror 2.0.18",
  "uuid",
 ]

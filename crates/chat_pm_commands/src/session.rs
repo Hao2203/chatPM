@@ -1,6 +1,7 @@
 use anyhow::Result as AnyhowResult;
 use chat_pm_database::{ChatDb, DbError};
 use chat_pm_deepseek::{ApiError, ChatRequestConfig, Client as DeepseekClient, ReasoningEffort};
+use chat_pm_sync::DeviceId;
 use tokio::sync::mpsc;
 use tracing::{debug, info};
 
@@ -41,6 +42,7 @@ pub struct ChatConfig {
     pub system_role: String,
     pub thinking_enabled: bool,
     pub reasoning_effort: Option<ReasoningEffort>,
+    pub device_id: DeviceId,
 }
 
 impl ChatConfig {
@@ -88,6 +90,7 @@ impl Default for ChatConfig {
             system_role: "你是一名智能助手，能够记住对话历史并提供连贯的回答。".to_string(),
             thinking_enabled: false,
             reasoning_effort: None,
+            device_id: DeviceId::generate(),
         }
     }
 }
@@ -300,6 +303,7 @@ impl ChatService {
                 assistant_text,
                 Some(prompt_tokens_result as i64),
                 Some(completion_tokens_result as i64),
+                config.device_id,
             ) {
                 tracing::error!(%sid, error = %e, "Failed to save chat record");
             }
