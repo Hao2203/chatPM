@@ -155,46 +155,43 @@ impl ChatDb {
     pub fn delete_session(&self, session_id: SessionId) -> DbResult<bool> {
         let conn = self.lock_conn()?;
         conn.execute_batch("BEGIN")?;
-        conn.execute(
-            "DELETE FROM turns WHERE session_id = ?1",
-            params![session_id.as_uuid()],
-        )?;
-        conn.execute(
-            "DELETE FROM summaries WHERE session_id = ?1",
-            params![session_id.as_uuid()],
-        )?;
-        let rows = conn.execute(
-            "DELETE FROM sessions WHERE session_id = ?1",
-            params![session_id.as_uuid()],
-        )?;
+        conn.prepare_cached("DELETE FROM turns WHERE session_id = ?1")?
+            .execute(params![session_id.as_uuid()])?;
+        conn.prepare_cached("DELETE FROM summaries WHERE session_id = ?1")?
+            .execute(params![session_id.as_uuid()])?;
+        let rows = conn
+            .prepare_cached("DELETE FROM sessions WHERE session_id = ?1")?
+            .execute(params![session_id.as_uuid()])?;
         conn.execute_batch("COMMIT")?;
         Ok(rows > 0)
     }
 
     pub fn upsert_session(&self, record: SessionRecord) -> DbResult<()> {
         let conn = self.lock_conn()?;
-        conn.execute(
+        conn.prepare_cached(
             "INSERT INTO sessions (session_id, created_at, title, user_persona)
              VALUES (?1, ?2, ?3, ?4)
              ON CONFLICT(session_id) DO UPDATE SET
                  created_at   = excluded.created_at,
                  title        = excluded.title,
                  user_persona = excluded.user_persona",
-            params![
-                record.session_id.as_uuid(),
-                record.created_at.timestamp(),
-                record.title,
-                record.user_persona,
-            ],
-        )?;
+        )?
+        .execute(params![
+            record.session_id.as_uuid(),
+            record.created_at.timestamp(),
+            record.title,
+            record.user_persona,
+        ])?;
         Ok(())
     }
 
     pub fn get_session(&self, session_id: SessionId) -> DbResult<Option<SessionRecord>> {
         let conn = self.lock_conn()?;
         Ok(conn
-            .query_row(
+            .prepare_cached(
                 "SELECT session_id, created_at, title, user_persona FROM sessions WHERE session_id = ?1",
+            )?
+            .query_row(
                 params![session_id.as_uuid()],
                 |row| {
                     let created_at: i64 = row.get(1)?;
@@ -212,7 +209,7 @@ impl ChatDb {
 
     pub fn list_sessions(&self) -> DbResult<Vec<SessionRecord>> {
         let conn = self.lock_conn()?;
-        let mut stmt = conn.prepare(
+        let mut stmt = conn.prepare_cached(
             "SELECT session_id, created_at, title, user_persona FROM sessions ORDER BY created_at DESC",
         )?;
         let rows = stmt.query_map([], |row| {
@@ -230,21 +227,16 @@ impl ChatDb {
 
     pub fn set_session_title(&self, session_id: SessionId, title: &str) -> DbResult<()> {
         let conn = self.lock_conn()?;
-        conn.execute(
-            "UPDATE sessions SET title = ?1 WHERE session_id = ?2",
-            params![title, session_id.as_uuid()],
-        )?;
+        conn.prepare_cached("UPDATE sessions SET title = ?1 WHERE session_id = ?2")?
+            .execute(params![title, session_id.as_uuid()])?;
         Ok(())
     }
 
     pub fn get_session_title(&self, session_id: SessionId) -> DbResult<Option<String>> {
         let conn = self.lock_conn()?;
         Ok(conn
-            .query_row(
-                "SELECT title FROM sessions WHERE session_id = ?1",
-                params![session_id.as_uuid()],
-                |row| row.get(0),
-            )
+            .prepare_cached("SELECT title FROM sessions WHERE session_id = ?1")?
+            .query_row(params![session_id.as_uuid()], |row| row.get(0))
             .optional()?)
     }
 
@@ -260,11 +252,11 @@ impl ChatDb {
     ) -> DbResult<()> {
         let turn_id = TurnId::generate();
         let conn = self.lock_conn()?;
-        let turn_num: i64 = conn.query_row(
-            "SELECT COALESCE(MAX(turn_num), 0) + 1 FROM turns WHERE session_id = ?1",
-            params![session_id.as_uuid()],
-            |row| row.get(0),
-        )?;
+        let turn_num: i64 = conn
+            .prepare_cached(
+                "SELECT COALESCE(MAX(turn_num), 0) + 1 FROM turns WHERE session_id = ?1",
+            )?
+            .query_row(params![session_id.as_uuid()], |row| row.get(0))?;
         drop(conn);
         self.append_turn(TurnRecord {
             turn_id,
@@ -280,26 +272,26 @@ impl ChatDb {
 
     pub fn append_turn(&self, record: TurnRecord) -> DbResult<()> {
         let conn = self.lock_conn()?;
-        conn.execute(
+        conn.prepare_cached(
             "INSERT INTO turns (session_id, turn_uuid, turn_num, user_text, assistant_text, created_at, prompt_tokens, completion_tokens)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
-            params![
-                record.session_id.as_uuid(),
-                record.turn_id.as_uuid(),
-                record.turn_num as i64,
-                record.user_text,
-                record.assistant_text,
-                record.created_at.timestamp(),
-                record.prompt_tokens,
-                record.completion_tokens,
-            ],
-        )?;
+        )?
+        .execute(params![
+            record.session_id.as_uuid(),
+            record.turn_id.as_uuid(),
+            record.turn_num as i64,
+            record.user_text,
+            record.assistant_text,
+            record.created_at.timestamp(),
+            record.prompt_tokens,
+            record.completion_tokens,
+        ])?;
         Ok(())
     }
 
     pub fn recent_turns(&self, session_id: SessionId, n: usize) -> DbResult<Vec<TurnRecord>> {
         let conn = self.lock_conn()?;
-        let mut stmt = conn.prepare(
+        let mut stmt = conn.prepare_cached(
             "SELECT turn_uuid, turn_num, session_id, user_text, assistant_text, created_at, prompt_tokens, completion_tokens
              FROM turns
              WHERE session_id = ?1
@@ -349,7 +341,7 @@ impl ChatDb {
         last_turn_uuid: Uuid,
     ) -> DbResult<()> {
         let conn = self.lock_conn()?;
-        conn.execute(
+        conn.prepare_cached(
             "INSERT INTO summaries (session_id, content, last_turn_uuid, last_turn_num, created_at)
              VALUES (?1, ?2, ?3, ?4, ?5)
              ON CONFLICT(session_id) DO UPDATE SET
@@ -357,14 +349,14 @@ impl ChatDb {
                  last_turn_uuid = excluded.last_turn_uuid,
                  last_turn_num = excluded.last_turn_num,
                  created_at = excluded.created_at",
-            params![
-                session_id.as_uuid(),
-                content,
-                last_turn_uuid,
-                last_turn_num,
-                Utc::now().timestamp()
-            ],
-        )?;
+        )?
+        .execute(params![
+            session_id.as_uuid(),
+            content,
+            last_turn_uuid,
+            last_turn_num,
+            Utc::now().timestamp()
+        ])?;
         Ok(())
     }
 
@@ -372,8 +364,10 @@ impl ChatDb {
     pub fn get_summary(&self, session_id: SessionId) -> DbResult<Option<(String, Uuid, i64)>> {
         let conn = self.lock_conn()?;
         Ok(conn
-            .query_row(
+            .prepare_cached(
                 "SELECT content, last_turn_uuid, last_turn_num FROM summaries WHERE session_id = ?1",
+            )?
+            .query_row(
                 params![session_id.as_uuid()],
                 |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
             )
@@ -383,22 +377,23 @@ impl ChatDb {
     /// 统计会话的总轮次数。
     pub fn count_turns(&self, session_id: SessionId) -> DbResult<u64> {
         let conn = self.lock_conn()?;
-        let count: i64 = conn.query_row(
-            "SELECT COUNT(*) FROM turns WHERE session_id = ?1",
-            params![session_id.as_uuid()],
-            |row| row.get(0),
-        )?;
+        let count: i64 = conn
+            .prepare_cached("SELECT COUNT(*) FROM turns WHERE session_id = ?1")?
+            .query_row(params![session_id.as_uuid()], |row| row.get(0))?;
         Ok(count as u64)
     }
 
     /// 查询指定 turn_num 对应的 TurnId（UUID）。
     pub fn turn_id_by_num(&self, session_id: SessionId, turn_num: u64) -> DbResult<TurnId> {
         let conn = self.lock_conn()?;
-        let uuid: Uuid = conn.query_row(
-            "SELECT turn_uuid FROM turns WHERE session_id = ?1 AND turn_num = ?2",
-            params![session_id.as_uuid(), turn_num as i64],
-            |row| row.get(0),
-        )?;
+        let uuid: Uuid = conn
+            .prepare_cached(
+                "SELECT turn_uuid FROM turns WHERE session_id = ?1 AND turn_num = ?2",
+            )?
+            .query_row(
+                params![session_id.as_uuid(), turn_num as i64],
+                |row| row.get(0),
+            )?;
         Ok(TurnId::from_uuid(uuid))
     }
 
@@ -410,7 +405,7 @@ impl ChatDb {
         to: u64,
     ) -> DbResult<Vec<Memory>> {
         let conn = self.lock_conn()?;
-        let mut stmt = conn.prepare(
+        let mut stmt = conn.prepare_cached(
             "SELECT turn_num, user_text, assistant_text
              FROM turns
              WHERE session_id = ?1 AND turn_num BETWEEN ?2 AND ?3
@@ -436,22 +431,19 @@ impl ChatDb {
 
     pub fn set_config(&self, key: &str, value: &str) -> DbResult<()> {
         let conn = self.lock_conn()?;
-        conn.execute(
+        conn.prepare_cached(
             "INSERT INTO config (key, value) VALUES (?1, ?2)
              ON CONFLICT(key) DO UPDATE SET value = excluded.value",
-            params![key, value],
-        )?;
+        )?
+        .execute(params![key, value])?;
         Ok(())
     }
 
     pub fn get_config(&self, key: &str) -> DbResult<Option<String>> {
         let conn = self.lock_conn()?;
         Ok(conn
-            .query_row(
-                "SELECT value FROM config WHERE key = ?1",
-                params![key],
-                |row| row.get(0),
-            )
+            .prepare_cached("SELECT value FROM config WHERE key = ?1")?
+            .query_row(params![key], |row| row.get(0))
             .optional()?)
     }
 
@@ -460,9 +452,11 @@ impl ChatDb {
     pub fn stats(&self) -> DbResult<DbStats> {
         let conn = self.lock_conn()?;
         let session_count: usize =
-            conn.query_row("SELECT COUNT(*) FROM sessions", [], |row| row.get(0))?;
+            conn.prepare_cached("SELECT COUNT(*) FROM sessions")?
+                .query_row([], |row| row.get(0))?;
         let total_turn_count: usize =
-            conn.query_row("SELECT COUNT(*) FROM turns", [], |row| row.get(0))?;
+            conn.prepare_cached("SELECT COUNT(*) FROM turns")?
+                .query_row([], |row| row.get(0))?;
         Ok(DbStats {
             session_count,
             total_turn_count,
