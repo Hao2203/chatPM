@@ -68,8 +68,8 @@ impl Serialize for DeviceId {
 
 impl<'de> Deserialize<'de> for DeviceId {
     fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-        let s = String::deserialize(deserializer)?;
-        Self::from_hex(&s).map_err(serde::de::Error::custom)
+        let s = <&str>::deserialize(deserializer)?;
+        Self::from_hex(s).map_err(serde::de::Error::custom)
     }
 }
 
@@ -110,13 +110,19 @@ mod tests {
     #[test]
     fn test_invalid_hex() {
         assert!(DeviceId::from_hex("short").is_err());
-        assert!(DeviceId::from_hex("gggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggg").is_err());
+        assert!(
+            DeviceId::from_hex("gggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggg")
+                .is_err()
+        );
     }
 
     #[test]
     fn test_display() {
         let bytes = [0u8; 32];
         let id = DeviceId(bytes);
-        assert_eq!(id.to_string(), "0000000000000000000000000000000000000000000000000000000000000000");
+        assert_eq!(
+            id.to_string(),
+            "0000000000000000000000000000000000000000000000000000000000000000"
+        );
     }
 }
