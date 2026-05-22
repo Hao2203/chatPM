@@ -1,3 +1,5 @@
+use std::str::FromStr;
+
 use crate::{message::UserInput, prompt::TitlePrompt};
 use uuid::Uuid;
 
@@ -31,6 +33,14 @@ impl Default for SessionId {
 impl std::fmt::Display for SessionId {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "{}", self.0)
+    }
+}
+
+impl FromStr for SessionId {
+    type Err = uuid::Error;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        Uuid::parse_str(s).map(SessionId)
     }
 }
 

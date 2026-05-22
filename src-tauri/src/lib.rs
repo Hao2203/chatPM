@@ -24,31 +24,31 @@ struct AppState {
 
 #[derive(Debug, Clone, Serialize)]
 struct ChatChunkPayload {
-    session_id: String,
+    session_id: SessionId,
     content: String,
 }
 
 #[derive(Debug, Clone, Serialize)]
 struct ChatDonePayload {
-    session_id: String,
+    session_id: SessionId,
     prompt_tokens: Option<usize>,
     completion_tokens: Option<usize>,
 }
 
 #[derive(Debug, Clone, Serialize)]
-struct SessionTitlePayload<'a> {
-    session_id: String,
-    title: &'a str,
+struct SessionTitlePayload {
+    session_id: SessionId,
+    title: String,
 }
 
 #[derive(Debug, Clone, Serialize)]
 struct SessionDeletedPayload {
-    session_id: String,
+    session_id: SessionId,
 }
 
 #[derive(Debug, Clone, Serialize)]
 struct SessionInfo {
-    session_id: String,
+    session_id: SessionId,
     created_at: String,
     title: Option<String>,
 }
@@ -167,10 +167,9 @@ async fn send_message(
         guard.clone().ok_or_else(AppError::not_configured)?
     };
 
-    let session_id =
-        SessionId::from_uuid(uuid::Uuid::parse_str(session_id).map_err(|e| {
-            AppError::new(ErrorKind::Validation, format!("Invalid session ID: {e}"))
-        })?);
+    let session_id = session_id.parse::<SessionId>().map_err(|e| {
+        AppError::new(ErrorKind::Validation, format!("Invalid session ID: {e}"))
+    })?;
     let user_input = UserInput::new(content);
 
     // ── 状态机：NewSession / Session 分流 ──────────────────────
@@ -187,8 +186,8 @@ async fn send_message(
             let _ = app.emit(
                 "session-title-updated",
                 SessionTitlePayload {
-                    session_id: session.session_id().to_string(),
-                    title: session.title().as_str(),
+                    session_id: session.session_id(),
+                    title: session.title().to_string(),
                 },
             );
 
@@ -202,7 +201,7 @@ async fn send_message(
         .await
         .map_err(AppError::from)?;
 
-    let sid_str = session.session_id().to_string();
+    let sid = session.session_id();
     let app_handle = app.clone();
 
     // Spawn a task to forward streaming chunks as Tauri events
@@ -222,13 +221,13 @@ async fn send_message(
                     let _ = app_handle.emit(
                         "chat-chunk",
                         ChatChunkPayload {
-                            session_id: sid_str.clone(),
+                            session_id: sid,
                             content: frame.content,
                         },
                     );
                 }
                 Err(e) => {
-                    tracing::error!(%sid_str, "stream error: {e}");
+                    tracing::error!(%sid, "stream error: {e}");
                     break;
                 }
             }
@@ -236,7 +235,7 @@ async fn send_message(
         let _ = app_handle.emit(
             "chat-done",
             ChatDonePayload {
-                session_id: sid_str,
+                session_id: sid,
                 prompt_tokens,
                 completion_tokens,
             },
@@ -253,7 +252,7 @@ fn list_sessions(state: State<'_, AppState>) -> Result<Vec<SessionInfo>, AppErro
     Ok(sessions
         .into_iter()
         .map(|s| SessionInfo {
-            session_id: s.session_id.to_string(),
+            session_id: s.session_id,
             created_at: s.created_at.to_rfc3339(),
             title: s.title,
         })
@@ -263,10 +262,9 @@ fn list_sessions(state: State<'_, AppState>) -> Result<Vec<SessionInfo>, AppErro
 #[tauri::command]
 fn get_turns(state: State<'_, AppState>, session_id: &str) -> Result<Vec<TurnInfo>, AppError> {
     let db = state.db.try_lock().map_err(|_| AppError::locked())?;
-    let sid =
-        SessionId::from_uuid(uuid::Uuid::parse_str(session_id).map_err(|e| {
-            AppError::new(ErrorKind::Validation, format!("Invalid session ID: {e}"))
-        })?);
+    let sid = session_id.parse::<SessionId>().map_err(|e| {
+        AppError::new(ErrorKind::Validation, format!("Invalid session ID: {e}"))
+    })?;
     let turns = db.recent_turns(sid, 1000)?;
     let infos: Vec<TurnInfo> = turns
         .into_iter()
@@ -290,17 +288,16 @@ fn update_session_title(
     title: &str,
 ) -> Result<(), AppError> {
     let db = state.db.try_lock().map_err(|_| AppError::locked())?;
-    let sid =
-        SessionId::from_uuid(uuid::Uuid::parse_str(session_id).map_err(|e| {
-            AppError::new(ErrorKind::Validation, format!("Invalid session ID: {e}"))
-        })?);
+    let sid = session_id.parse::<SessionId>().map_err(|e| {
+        AppError::new(ErrorKind::Validation, format!("Invalid session ID: {e}"))
+    })?;
     db.set_session_title(sid, title)?;
     drop(db);
     let _ = app.emit(
         "session-title-updated",
         SessionTitlePayload {
-            session_id: session_id.to_string(),
-            title,
+            session_id: sid,
+            title: title.to_string(),
         },
     );
     Ok(())
@@ -310,16 +307,15 @@ fn update_session_title(
 fn delete_session(
     app: tauri::AppHandle,
     state: State<'_, AppState>,
-    session_id: String,
+    session_id: &str,
 ) -> Result<(), AppError> {
     let db = state.db.try_lock().map_err(|_| AppError::locked())?;
-    let sid =
-        SessionId::from_uuid(uuid::Uuid::parse_str(&session_id).map_err(|e| {
-            AppError::new(ErrorKind::Validation, format!("Invalid session ID: {e}"))
-        })?);
+    let sid = session_id.parse::<SessionId>().map_err(|e| {
+        AppError::new(ErrorKind::Validation, format!("Invalid session ID: {e}"))
+    })?;
     db.delete_session(sid)?;
     drop(db);
-    let _ = app.emit("session-deleted", SessionDeletedPayload { session_id });
+    let _ = app.emit("session-deleted", SessionDeletedPayload { session_id: sid });
     Ok(())
 }
 
