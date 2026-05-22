@@ -36,9 +36,9 @@ struct ChatDonePayload {
 }
 
 #[derive(Debug, Clone, Serialize)]
-struct SessionTitlePayload {
+struct SessionTitlePayload<'a> {
     session_id: String,
-    title: String,
+    title: &'a str,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -125,7 +125,7 @@ fn get_model(state: State<'_, AppState>) -> Result<String, AppError> {
 }
 
 #[tauri::command]
-fn set_model(state: State<'_, AppState>, model: String) -> Result<(), AppError> {
+fn set_model(state: State<'_, AppState>, model: &str) -> Result<(), AppError> {
     let model = model.trim().to_ascii_lowercase();
     if !SUPPORTED_MODELS.contains(&model.as_str()) {
         return Err(AppError::new(
@@ -159,19 +159,19 @@ fn set_model(state: State<'_, AppState>, model: String) -> Result<(), AppError> 
 async fn send_message(
     app: tauri::AppHandle,
     state: State<'_, AppState>,
-    session_id: String,
-    content: String,
+    session_id: &str,
+    content: &str,
 ) -> Result<(), AppError> {
     let service = {
         let guard = state.service.lock().await;
         guard.clone().ok_or_else(AppError::not_configured)?
     };
 
-    let session_id = SessionId::from_uuid(
-        uuid::Uuid::parse_str(&session_id)
-            .map_err(|e| AppError::new(ErrorKind::Validation, format!("Invalid session ID: {e}")))?,
-    );
-    let user_input = UserInput::new(&content);
+    let session_id =
+        SessionId::from_uuid(uuid::Uuid::parse_str(session_id).map_err(|e| {
+            AppError::new(ErrorKind::Validation, format!("Invalid session ID: {e}"))
+        })?);
+    let user_input = UserInput::new(content);
 
     // ── 状态机：NewSession / Session 分流 ──────────────────────
     let session = match service.resume_session(session_id) {
@@ -188,7 +188,7 @@ async fn send_message(
                 "session-title-updated",
                 SessionTitlePayload {
                     session_id: session.session_id().to_string(),
-                    title: session.title().to_string(),
+                    title: session.title().as_str(),
                 },
             );
 
@@ -261,12 +261,12 @@ fn list_sessions(state: State<'_, AppState>) -> Result<Vec<SessionInfo>, AppErro
 }
 
 #[tauri::command]
-fn get_turns(state: State<'_, AppState>, session_id: String) -> Result<Vec<TurnInfo>, AppError> {
+fn get_turns(state: State<'_, AppState>, session_id: &str) -> Result<Vec<TurnInfo>, AppError> {
     let db = state.db.try_lock().map_err(|_| AppError::locked())?;
-    let sid = SessionId::from_uuid(
-        uuid::Uuid::parse_str(&session_id)
-            .map_err(|e| AppError::new(ErrorKind::Validation, format!("Invalid session ID: {e}")))?,
-    );
+    let sid =
+        SessionId::from_uuid(uuid::Uuid::parse_str(session_id).map_err(|e| {
+            AppError::new(ErrorKind::Validation, format!("Invalid session ID: {e}"))
+        })?);
     let turns = db.recent_turns(sid, 1000)?;
     let infos: Vec<TurnInfo> = turns
         .into_iter()
@@ -286,19 +286,22 @@ fn get_turns(state: State<'_, AppState>, session_id: String) -> Result<Vec<TurnI
 fn update_session_title(
     app: tauri::AppHandle,
     state: State<'_, AppState>,
-    session_id: String,
-    title: String,
+    session_id: &str,
+    title: &str,
 ) -> Result<(), AppError> {
     let db = state.db.try_lock().map_err(|_| AppError::locked())?;
-    let sid = SessionId::from_uuid(
-        uuid::Uuid::parse_str(&session_id)
-            .map_err(|e| AppError::new(ErrorKind::Validation, format!("Invalid session ID: {e}")))?,
-    );
-    db.set_session_title(sid, &title)?;
+    let sid =
+        SessionId::from_uuid(uuid::Uuid::parse_str(session_id).map_err(|e| {
+            AppError::new(ErrorKind::Validation, format!("Invalid session ID: {e}"))
+        })?);
+    db.set_session_title(sid, title)?;
     drop(db);
     let _ = app.emit(
         "session-title-updated",
-        SessionTitlePayload { session_id, title },
+        SessionTitlePayload {
+            session_id: session_id.to_string(),
+            title,
+        },
     );
     Ok(())
 }
@@ -310,10 +313,10 @@ fn delete_session(
     session_id: String,
 ) -> Result<(), AppError> {
     let db = state.db.try_lock().map_err(|_| AppError::locked())?;
-    let sid = SessionId::from_uuid(
-        uuid::Uuid::parse_str(&session_id)
-            .map_err(|e| AppError::new(ErrorKind::Validation, format!("Invalid session ID: {e}")))?,
-    );
+    let sid =
+        SessionId::from_uuid(uuid::Uuid::parse_str(&session_id).map_err(|e| {
+            AppError::new(ErrorKind::Validation, format!("Invalid session ID: {e}"))
+        })?);
     db.delete_session(sid)?;
     drop(db);
     let _ = app.emit("session-deleted", SessionDeletedPayload { session_id });
