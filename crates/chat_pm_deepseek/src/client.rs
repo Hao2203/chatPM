@@ -7,9 +7,35 @@ use tokio::sync::mpsc;
 
 use crate::{ApiError, ApiKey, config::ReasoningEffort};
 
+#[derive(Debug, Clone, Copy)]
+pub enum DeepSeekModel {
+    V4Flash,
+    V4Pro,
+}
+
+impl DeepSeekModel {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            DeepSeekModel::V4Flash => "deepseek-v4-flash",
+            DeepSeekModel::V4Pro => "deepseek-v4-pro",
+        }
+    }
+}
+
+impl std::str::FromStr for DeepSeekModel {
+    type Err = anyhow::Error;
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "deepseek-v4-flash" => Ok(DeepSeekModel::V4Flash),
+            "deepseek-v4-pro" => Ok(DeepSeekModel::V4Pro),
+            _ => Err(anyhow::anyhow!("Unknown model: {s}")),
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct ChatRequestConfig {
-    pub model: String,
+    pub model: DeepSeekModel,
     pub max_tokens: usize,
     pub thinking_enabled: bool,
     pub reasoning_effort: Option<ReasoningEffort>,
@@ -40,8 +66,8 @@ impl Client {
     }
 
     pub fn from_env() -> Result<Self, ChatError> {
-        let api_key = std::env::var("DEEPSEEK_API_KEY")
-            .map_err(|_| ChatError::ApiKeyNotConfigured)?;
+        let api_key =
+            std::env::var("DEEPSEEK_API_KEY").map_err(|_| ChatError::ApiKeyNotConfigured)?;
         let api_key = ApiKey::new(api_key).ok_or(ChatError::InvalidApiKey)?;
         Ok(Self::new(api_key))
     }
@@ -63,7 +89,7 @@ impl Client {
             .collect();
 
         let mut body = json!({
-            "model": request.model,
+            "model": request.model.as_str(),
             "messages": req_messages,
             "max_tokens": request.max_tokens,
             "stream": false,
@@ -81,7 +107,10 @@ impl Client {
         let resp: ChatCompleteResponse = self
             .http
             .post(format!("{}/chat/completions", self.api_base))
-            .header(AUTHORIZATION, format!("Bearer {}", self.api_key.expose_secret()))
+            .header(
+                AUTHORIZATION,
+                format!("Bearer {}", self.api_key.expose_secret()),
+            )
             .header(CONTENT_TYPE, "application/json")
             .json(&body)
             .send()
@@ -93,11 +122,7 @@ impl Client {
             .await
             .map_err(|e| ApiError::ParseFailed(e.to_string()))?;
 
-        let choice = resp
-            .choices
-            .into_iter()
-            .next()
-            .ok_or(ApiError::NoChoice)?;
+        let choice = resp.choices.into_iter().next().ok_or(ApiError::NoChoice)?;
 
         Ok(choice.message.content)
     }
@@ -118,7 +143,7 @@ impl Client {
             .collect();
 
         let mut body = json!({
-            "model": request.model,
+            "model": request.model.as_str(),
             "messages": req_messages,
             "max_tokens": request.max_tokens,
             "stream": true,
@@ -137,7 +162,10 @@ impl Client {
         let response = self
             .http
             .post(format!("{}/chat/completions", self.api_base))
-            .header(AUTHORIZATION, format!("Bearer {}", self.api_key.expose_secret()))
+            .header(
+                AUTHORIZATION,
+                format!("Bearer {}", self.api_key.expose_secret()),
+            )
             .header(CONTENT_TYPE, "application/json")
             .json(&body)
             .send()
@@ -175,25 +203,29 @@ impl Client {
                         return;
                     }
 
-                    let parsed: Result<ChatStreamResponse, _> =
-                        serde_json::from_str(data).map_err(|e| ApiError::ParseFailed(e.to_string()));
+                    let parsed: Result<ChatStreamResponse, _> = serde_json::from_str(data)
+                        .map_err(|e| ApiError::ParseFailed(e.to_string()));
 
                     let frame = parsed.and_then(|resp| {
                         // Usage-only chunk after streaming ends (choices empty, usage present)
                         if resp.choices.is_empty() {
                             return Ok(ChatChunk {
                                 raw_text: String::new(),
-                                prompt_tokens: resp.usage.as_ref().map(|u| u.prompt_tokens).unwrap_or(0),
-                                completion_tokens: resp.usage.as_ref().map(|u| u.completion_tokens).unwrap_or(0),
+                                prompt_tokens: resp
+                                    .usage
+                                    .as_ref()
+                                    .map(|u| u.prompt_tokens)
+                                    .unwrap_or(0),
+                                completion_tokens: resp
+                                    .usage
+                                    .as_ref()
+                                    .map(|u| u.completion_tokens)
+                                    .unwrap_or(0),
                                 stop_reason: None,
                             });
                         }
 
-                        let choice = resp
-                            .choices
-                            .into_iter()
-                            .next()
-                            .ok_or(ApiError::NoChoice)?;
+                        let choice = resp.choices.into_iter().next().ok_or(ApiError::NoChoice)?;
 
                         let mut raw_text = String::new();
                         if let Some(reasoning) = choice.delta.reasoning_content {
@@ -205,8 +237,16 @@ impl Client {
 
                         Ok(ChatChunk {
                             raw_text,
-                            prompt_tokens: resp.usage.as_ref().map(|u| u.prompt_tokens).unwrap_or(0),
-                            completion_tokens: resp.usage.as_ref().map(|u| u.completion_tokens).unwrap_or(0),
+                            prompt_tokens: resp
+                                .usage
+                                .as_ref()
+                                .map(|u| u.prompt_tokens)
+                                .unwrap_or(0),
+                            completion_tokens: resp
+                                .usage
+                                .as_ref()
+                                .map(|u| u.completion_tokens)
+                                .unwrap_or(0),
                             stop_reason: choice.finish_reason.as_deref().map(map_finish_reason),
                         })
                     });

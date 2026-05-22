@@ -1,6 +1,8 @@
 use anyhow::Result as AnyhowResult;
 use chat_pm_database::{ChatDb, DbError};
-use chat_pm_deepseek::{ApiError, ChatRequestConfig, Client as DeepseekClient, ReasoningEffort};
+use chat_pm_deepseek::{
+    ApiError, ChatRequestConfig, Client as DeepseekClient, DeepSeekModel, ReasoningEffort,
+};
 use chat_pm_sync::DeviceId;
 use tokio::sync::mpsc;
 use tracing::{debug, info};
@@ -32,7 +34,7 @@ pub enum CommandError {
 
 #[derive(Debug, Clone)]
 pub struct ChatConfig {
-    pub chat_model: String,
+    pub chat_model: DeepSeekModel,
     pub token_limit: usize,
     pub reply_token_limit: usize,
     pub short_term_turns: usize,
@@ -59,8 +61,9 @@ impl ChatConfig {
         Ok(())
     }
 
-    pub fn set_chat_model(&mut self, model: &str) {
-        self.chat_model = model.to_string();
+    pub fn set_chat_model(&mut self, model: &str) -> AnyhowResult<()> {
+        self.chat_model = model.parse()?;
+        Ok(())
     }
 
     pub fn set_reasoning_effort_from_str(&mut self, value: &str) -> AnyhowResult<()> {
@@ -80,7 +83,7 @@ impl ChatConfig {
 impl Default for ChatConfig {
     fn default() -> Self {
         Self {
-            chat_model: "deepseek-v4-flash".to_string(),
+            chat_model: DeepSeekModel::V4Flash,
             token_limit: 8192,
             reply_token_limit: 2048,
             short_term_turns: 6,
@@ -97,28 +100,20 @@ impl Default for ChatConfig {
 
 // ── Title config (constant for the lightweight title generation request) ─
 
-fn title_request_config(model: &str) -> ChatRequestConfig {
+fn title_request_config(model: DeepSeekModel) -> ChatRequestConfig {
     ChatRequestConfig {
-        model: model.to_string(),
+        model,
         max_tokens: 32,
         thinking_enabled: false,
         reasoning_effort: None,
     }
 }
 
-fn clean_title(raw: &str) -> Title {
-    Title::new(
-        raw.trim()
-            .trim_matches(['"', '\'', '《', '》', '「', '」'])
-            .to_string(),
-    )
-}
-
 // ── Summary config (constant for the lightweight summary generation request) ─
 
-fn summary_request_config(model: &str) -> ChatRequestConfig {
+fn summary_request_config(model: DeepSeekModel) -> ChatRequestConfig {
     ChatRequestConfig {
-        model: model.to_string(),
+        model,
         max_tokens: 512,
         thinking_enabled: false,
         reasoning_effort: None,
@@ -172,10 +167,10 @@ impl ChatService {
 
         let raw_title = self
             .client
-            .chat_complete(&title_request_config(&self.config.chat_model), &messages)
+            .chat_complete(&title_request_config(self.config.chat_model), &messages)
             .await?;
 
-        let title = clean_title(&raw_title);
+        let title = Title::new(raw_title);
         self.db.set_session_title(session_id, title.as_str())?;
         info!(session_id = %session_id, %title, "Session title generated");
         Ok(Session::resume(session_id, title))
@@ -247,7 +242,7 @@ impl ChatService {
             .client
             .stream_chat(
                 &ChatRequestConfig {
-                    model: self.config.chat_model.clone(),
+                    model: self.config.chat_model,
                     max_tokens: self.config.reply_token_limit,
                     thinking_enabled: self.config.thinking_enabled,
                     reasoning_effort: self.config.reasoning_effort,
@@ -377,7 +372,7 @@ async fn summarize_session_inner(
     let messages = prompt.compose();
 
     let new_content = client
-        .chat_complete(&summary_request_config(&config.chat_model), &messages)
+        .chat_complete(&summary_request_config(config.chat_model), &messages)
         .await?;
 
     let trimmed_content = new_content.trim().to_string();

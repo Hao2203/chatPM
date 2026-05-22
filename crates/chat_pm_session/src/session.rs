@@ -41,8 +41,14 @@ impl std::fmt::Display for SessionId {
 pub struct Title(String);
 
 impl Title {
-    pub fn new(title: String) -> Self {
-        Self(title)
+    pub fn new(title: impl AsRef<str>) -> Self {
+        Self(
+            title
+                .as_ref()
+                .trim()
+                .trim_matches(['"', '\'', '《', '》', '「', '」'])
+                .to_string(),
+        )
     }
 
     pub fn as_str(&self) -> &str {

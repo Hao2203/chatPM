@@ -80,7 +80,7 @@ fn build_service(db: &ChatDb, raw_key: &str) -> Result<ChatService, AppError> {
         .flatten()
         .unwrap_or_else(|| DEFAULT_MODEL.to_string());
     let mut config = ChatConfig::default();
-    config.set_chat_model(&model);
+    config.set_chat_model(&model)?;
     ChatService::new(db.clone(), client, config).map_err(AppError::from)
 }
 
