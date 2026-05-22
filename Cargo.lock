@@ -684,6 +684,8 @@ dependencies = [
 name = "chat_pm_sync"
 version = "0.1.0"
 dependencies = [
+ "chat_pm_session",
+ "chrono",
  "iroh",
  "serde",
  "serde_json",
