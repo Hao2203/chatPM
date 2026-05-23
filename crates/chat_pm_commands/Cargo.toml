@@ -11,9 +11,15 @@ chat_pm_deepseek = { workspace = true }
 chat_pm_sync = { workspace = true }
 thiserror = { workspace = true }
 chrono = { workspace = true }
+distributed-topic-tracker = { workspace = true }
 dotenvy = { workspace = true }
 futures-lite = { workspace = true }
 http = { workspace = true }
+
+iroh = { workspace = true }
+iroh-gossip = { workspace = true }
+iroh-docs = { workspace = true }
+
 tokio = { workspace = true }
 tracing = { workspace = true }
 secrecy = { workspace = true }

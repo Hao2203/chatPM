@@ -31,6 +31,7 @@ tracing = { version = "0.1", features = ["log"] }
 http = { version = "1" }
 iroh = "0.98"
 iroh-gossip = "0.98"
+iroh-docs = "0.98"
 rusqlite = { version = "0.37", features = ["bundled", "uuid"] }
 reqwest = { version = "0.13", features = ["json", "stream"] }
 secrecy = "0.10"

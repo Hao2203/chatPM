@@ -12,6 +12,7 @@ uuid = { workspace = true }
 
 [dev-dependencies]
 iroh = { workspace = true }
+iroh-docs = { workspace = true }
 serde_json = { workspace = true }
 
 
