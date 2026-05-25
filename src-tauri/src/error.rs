@@ -2,6 +2,7 @@ use chat_pm_commands::session::CommandError;
 use chat_pm_database::DbError;
 use chat_pm_deepseek::ApiError;
 use chat_pm_session::ChatError;
+use chat_pm_sync::SyncError;
 use serde::Serialize;
 
 /// AppError 的错误类别。
@@ -123,6 +124,23 @@ impl From<CommandError> for AppError {
             CommandError::Db(d) => d.into(),
             CommandError::Api(a) => a.into(),
             CommandError::Internal(a) => a.into(),
+        }
+    }
+}
+
+impl From<SyncError> for AppError {
+    fn from(e: SyncError) -> Self {
+        match e {
+            SyncError::Other(_) => Self {
+                kind: ErrorKind::Internal,
+                message: e.to_string(),
+                source: Some(e.into()),
+            },
+            _ => Self {
+                kind: ErrorKind::Validation,
+                message: e.to_string(),
+                source: Some(e.into()),
+            },
         }
     }
 }

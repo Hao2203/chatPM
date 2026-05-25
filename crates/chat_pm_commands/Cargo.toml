@@ -19,7 +19,9 @@ http = { workspace = true }
 iroh = { workspace = true }
 iroh-gossip = { workspace = true }
 iroh-docs = { workspace = true }
+iroh-blobs = { workspace = true }
 
+ed25519-dalek = { workspace = true }
 tokio = { workspace = true }
 tracing = { workspace = true }
 secrecy = { workspace = true }

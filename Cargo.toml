@@ -25,6 +25,7 @@ derive_more = { version = "2", features = ["from", "into", "as_ref"] }
 distributed-topic-tracker = "0.3"
 dotenvy = "0.15"
 ed25519-dalek = "3.0.0-pre.6"
+iroh-blobs = "0.100"
 futures-lite = "2.6"
 logforth = { version = "0.29", features = ["bridge-log", "layout-text"] }
 tracing = { version = "0.1", features = ["log"] }

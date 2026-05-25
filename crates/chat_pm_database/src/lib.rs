@@ -8,7 +8,9 @@ use rusqlite::{Connection, params};
 use serde::{Deserialize, Serialize};
 
 use chat_pm_session::{chat::TurnId, memory::Memory, session::SessionId};
-use chat_pm_sync::DeviceId;
+use chat_pm_sync::{
+    DeviceId, SessionSnapshot, SessionWatermark, TurnSnapshot, VerifiedPayload,
+};
 use uuid::Uuid;
 
 // ── Schema ──────────────────────────────────────────────────────────
@@ -565,6 +567,136 @@ impl ChatDb {
             .prepare_cached("SELECT value FROM config WHERE key = ?1")?
             .query_row(params![key], |row| row.get(0))
             .optional()?)
+    }
+
+    // ── Sync: 水位与快照 ───────────────────────────────────────
+
+    /// 构建所有会话的本地水位列表。
+    pub fn build_watermarks(&self, device_id: DeviceId) -> DbResult<Vec<SessionWatermark>> {
+        let conn = self.lock_conn()?;
+        let mut stmt = conn.prepare_cached(
+            "SELECT s.session_id, s.created_at, s.title,
+                    COALESCE((SELECT MAX(turn_num) FROM turns WHERE session_id = s.session_id), 0)
+             FROM sessions s
+             ORDER BY s.created_at DESC",
+        )?;
+        let rows = stmt.query_map([], |row| {
+            let sid: Uuid = row.get(0)?;
+            let created_at: i64 = row.get(1)?;
+            let title: Option<String> = row.get(2)?;
+            let turn_count: i64 = row.get(3)?;
+            Ok(SessionWatermark {
+                session_id: SessionId::from_uuid(sid),
+                turn_count: turn_count as u64,
+                has_title: title.is_some(),
+                created_at: from_sql_timestamp(created_at)?,
+            })
+        })?;
+        let _ = device_id;
+        Ok(rows.collect::<Result<Vec<_>, _>>()?)
+    }
+
+    /// 获取单个会话快照。
+    pub fn get_session_snapshot(&self, session_id: SessionId) -> DbResult<Option<SessionSnapshot>> {
+        let conn = self.lock_conn()?;
+        Ok(conn
+            .prepare_cached("SELECT session_id, created_at, title FROM sessions WHERE session_id = ?1")?
+            .query_row(params![session_id.as_uuid()], |row| {
+                let sid: Uuid = row.get(0)?;
+                let created_at: i64 = row.get(1)?;
+                Ok(SessionSnapshot {
+                    session_id: SessionId::from_uuid(sid),
+                    created_at: from_sql_timestamp(created_at)?,
+                    title: row.get(2)?,
+                })
+            })
+            .optional()?)
+    }
+
+    /// 获取指定起始位置后的所有轮次快照。
+    pub fn get_turns_from(
+        &self,
+        session_id: SessionId,
+        start_turn: u64,
+    ) -> DbResult<Vec<TurnSnapshot>> {
+        let conn = self.lock_conn()?;
+        let mut stmt = conn.prepare_cached(
+            "SELECT turn_uuid, turn_num, session_id, user_text, assistant_text, created_at, device_id
+             FROM turns
+             WHERE session_id = ?1 AND turn_num >= ?2 AND device_id IS NOT NULL
+             ORDER BY turn_num ASC",
+        )?;
+        let rows = stmt.query_map(
+            params![session_id.as_uuid(), start_turn as i64],
+            |row| {
+                let turn_uuid: Uuid = row.get(0)?;
+                let turn_num: i64 = row.get(1)?;
+                let sid: Uuid = row.get(2)?;
+                let created_at: i64 = row.get(5)?;
+                let device_blob: Option<Vec<u8>> = row.get(6)?;
+                let did = device_blob
+                    .and_then(|b| {
+                        let arr: [u8; 32] = b.try_into().ok()?;
+                        Some(DeviceId::from_bytes(arr))
+                    })
+                    .unwrap_or_else(DeviceId::generate);
+                Ok(TurnSnapshot {
+                    turn_id: TurnId::from_uuid(turn_uuid),
+                    turn_num: turn_num as u64,
+                    session_id: SessionId::from_uuid(sid),
+                    user_text: row.get(3)?,
+                    assistant_text: row.get(4)?,
+                    created_at: from_sql_timestamp(created_at)?,
+                    device_id: did,
+                })
+            },
+        )?;
+        Ok(rows.collect::<Result<Vec<_>, _>>()?)
+    }
+
+    // ── Sync: 数据写入 ──────────────────────────────────────────
+
+    /// 插入或更新轮次记录（基于 turn_uuid 去重）。
+    pub fn upsert_turn(&self, snapshot: &TurnSnapshot) -> DbResult<()> {
+        let conn = self.lock_conn()?;
+        conn.prepare_cached(
+            "INSERT INTO turns (session_id, turn_uuid, turn_num, user_text, assistant_text, created_at, device_id, local_seq_no)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 0)
+             ON CONFLICT(turn_uuid) DO UPDATE SET
+                 turn_num        = excluded.turn_num,
+                 user_text       = excluded.user_text,
+                 assistant_text  = excluded.assistant_text,
+                 created_at      = excluded.created_at,
+                 device_id       = excluded.device_id",
+        )?
+        .execute(params![
+            snapshot.session_id.as_uuid(),
+            snapshot.turn_id.as_uuid(),
+            snapshot.turn_num as i64,
+            snapshot.user_text,
+            snapshot.assistant_text,
+            snapshot.created_at.timestamp(),
+            snapshot.device_id.as_bytes().to_vec(),
+        ])?;
+        Ok(())
+    }
+
+    /// 将已验证的同步数据写入本地 DB，返回写入的轮次数。
+    pub fn apply_verified_payload(&self, payload: &VerifiedPayload) -> DbResult<usize> {
+        for session in payload.sessions() {
+            self.upsert_session(SessionRecord {
+                session_id: session.session_id,
+                created_at: session.created_at,
+                title: session.title.clone(),
+                user_persona: None,
+            })?;
+        }
+        let mut turn_count = 0;
+        for turn in payload.turns() {
+            self.upsert_turn(turn)?;
+            turn_count += 1;
+        }
+        Ok(turn_count)
     }
 
     // ── Stats ───────────────────────────────────────────────────

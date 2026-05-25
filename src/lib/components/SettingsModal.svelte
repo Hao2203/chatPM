@@ -4,26 +4,38 @@
     apiKey = "",
     model = "deepseek-v4-flash",
     loading = false,
+    syncActive = false,
+    syncTicket = "",
     onApiKeyChange = (_val: string) => {},
     onModelChange = (_val: string) => {},
     onClose = () => {},
     onSave = () => {},
     onClear = () => {},
+    onCreateSync = () => {},
+    onJoinSync = (_ticket: string) => {},
+    onStopSync = () => {},
   }: {
     show: boolean;
     apiKey: string;
     model: string;
     loading: boolean;
+    syncActive: boolean;
+    syncTicket: string;
     onApiKeyChange: (val: string) => void;
     onModelChange: (val: string) => void;
     onClose: () => void;
     onSave: () => void;
     onClear: () => void;
+    onCreateSync: () => void;
+    onJoinSync: (ticket: string) => void;
+    onStopSync: () => void;
   } = $props();
 
-  type View = "menu" | "apikey" | "model" | "clear-data";
+  type View = "menu" | "apikey" | "model" | "clear-data" | "sync";
   let view = $state<View>("menu");
   let clearConfirm = $state(false);
+  let syncLoading = $state(false);
+  let joinTicket = $state("");
 
   // Reset to menu when opening
   $effect(() => {
@@ -88,6 +100,15 @@
               <polyline points="9 18 15 12 9 6"></polyline>
             </svg>
           </button>
+          <button class="menu-item" onclick={() => (view = "sync")}>
+            <div class="menu-item-text">
+              <span class="menu-item-title">设备同步</span>
+              <span class="menu-item-desc">{syncActive ? "同步中..." : "P2P 跨设备同步"}</span>
+            </div>
+            <svg class="menu-item-chevron" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round">
+              <polyline points="9 18 15 12 9 6"></polyline>
+            </svg>
+          </button>
           <button class="menu-item" onclick={() => (view = "clear-data")}>
             <div class="menu-item-text">
               <span class="menu-item-title">清除所有数据</span>
@@ -131,6 +152,90 @@
           </select>
         </div>
         <div class="settings-actions">
+          <button class="btn-cancel" onclick={() => (view = "menu")}>返回</button>
+        </div>
+
+      {:else if view === "sync"}
+        <div class="sync-panel">
+          {#if syncActive}
+            <div class="sync-status">
+              <span class="sync-indicator active"></span>
+              <span>同步已启用</span>
+            </div>
+
+            {#if syncTicket}
+              <label class="setting-label" style="margin-bottom:12px">
+                <span>同步凭证（ticket）</span>
+                <input type="text" value={syncTicket} readonly class="ticket-display" />
+              </label>
+            {/if}
+
+            <button class="btn-danger" onclick={() => { onStopSync(); }} disabled={syncLoading}>
+              {syncLoading ? "停止中..." : "停止同步"}
+            </button>
+          {:else}
+            <div class="sync-status">
+              <span class="sync-indicator"></span>
+              <span>同步未启用</span>
+            </div>
+
+            <p class="sync-info">
+              通过 P2P 网络与其他设备同步聊天记录。作为发起者创建同步链获取凭证，
+              其他设备凭凭证加入同一同步链。
+            </p>
+
+            <button
+              class="btn-primary"
+              style="width:100%"
+              onclick={async () => {
+                syncLoading = true;
+                try {
+                  await onCreateSync();
+                  view = "sync";
+                } finally {
+                  syncLoading = false;
+                }
+              }}
+              disabled={syncLoading}
+            >
+              {syncLoading ? "创建中..." : "创建同步链"}
+            </button>
+
+            <div class="sync-divider">
+              <span>或凭凭证加入</span>
+            </div>
+
+            <label class="setting-label" style="margin-bottom:12px">
+              <span>同步凭证（ticket）</span>
+              <input
+                type="text"
+                bind:value={joinTicket}
+                placeholder="粘贴同步凭证..."
+                disabled={syncLoading}
+              />
+            </label>
+
+            <button
+              class="btn-primary"
+              style="width:100%"
+              onclick={async () => {
+                if (!joinTicket.trim()) return;
+                syncLoading = true;
+                try {
+                  await onJoinSync(joinTicket.trim());
+                  joinTicket = "";
+                  view = "sync";
+                } finally {
+                  syncLoading = false;
+                }
+              }}
+              disabled={syncLoading || !joinTicket.trim()}
+            >
+              {syncLoading ? "加入中..." : "加入同步链"}
+            </button>
+          {/if}
+        </div>
+        <div class="settings-actions" style="margin-top:16px">
           <button class="btn-cancel" onclick={() => (view = "menu")}>返回</button>
         </div>
 
@@ -409,6 +514,68 @@
     font-size: 14px;
     line-height: 1.5;
     margin: 0 0 20px;
+  }
+
+  /* ── Sync Panel ───────────────────────────────────── */
+
+  .sync-panel {
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+  }
+
+  .sync-status {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    font-size: 14px;
+    color: var(--text-primary);
+    font-weight: 500;
+    margin-bottom: 4px;
+  }
+
+  .sync-indicator {
+    width: 10px;
+    height: 10px;
+    border-radius: 50%;
+    background: var(--text-muted);
+    flex-shrink: 0;
+  }
+
+  .sync-indicator.active {
+    background: var(--accent);
+    box-shadow: 0 0 6px var(--accent);
+  }
+
+  .sync-info {
+    color: var(--text-muted);
+    font-size: 13px;
+    line-height: 1.5;
+    margin: 0;
+  }
+
+  .sync-divider {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    color: var(--text-muted);
+    font-size: 12px;
+  }
+
+  .sync-divider::before,
+  .sync-divider::after {
+    content: "";
+    flex: 1;
+    height: 1px;
+    background: var(--border-color);
+  }
+
+  .ticket-display {
+    cursor: text;
+    user-select: all;
+    font-family: monospace;
+    font-size: 12px;
+    word-break: break-all;
   }
 
   @media (max-width: 768px) {

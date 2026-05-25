@@ -2,6 +2,7 @@
   "svelte.enable-ts-plugin": true,
   "cSpell.words": [
     "apikey",
+    "chatpm",
     "onapikeychange"
   ],
 }

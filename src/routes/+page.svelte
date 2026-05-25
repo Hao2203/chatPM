@@ -40,6 +40,11 @@
   let contextTokens = $state(0);
   const CONTEXT_WINDOW = 1_048_576; // must match ChatConfig.context_window
 
+  // ── Sync state ────────────────────────────────────────────
+  let syncActive = $state(false);
+  let syncLoading = $state(false);
+  let syncTicket = $state("");
+
   function formatNumber(n: number): string {
     return n.toLocaleString("en-US");
   }
@@ -201,6 +206,45 @@
     }
   }
 
+  // ── Sync actions ──────────────────────────────────────────
+  async function createSyncDoc() {
+    syncLoading = true;
+    try {
+      const ticket = await invoke<string>("init_and_create_sync_doc");
+      syncActive = true;
+      syncTicket = ticket;
+    } catch (e: any) {
+      alert("创建同步链失败：" + getErrorMessage(e));
+    } finally {
+      syncLoading = false;
+    }
+  }
+
+  async function joinSyncDoc(ticket: string) {
+    syncLoading = true;
+    try {
+      await invoke("join_sync_doc", { ticket });
+      syncActive = true;
+    } catch (e: any) {
+      alert("加入同步链失败：" + getErrorMessage(e));
+    } finally {
+      syncLoading = false;
+    }
+  }
+
+  async function stopSync() {
+    syncLoading = true;
+    try {
+      await invoke("stop_sync");
+      syncActive = false;
+      syncTicket = "";
+    } catch (e: any) {
+      alert("停止同步失败：" + getErrorMessage(e));
+    } finally {
+      syncLoading = false;
+    }
+  }
+
   // ── Send message ───────────────────────────────────────────
   async function sendMessage() {
     const text = inputText.trim();
@@ -298,6 +342,14 @@
     });
     loadSessions();
 
+    // Check sync status
+    invoke<{ status: string; active: boolean; ticket: string | null }>("get_sync_status").then(
+      (s) => {
+        syncActive = s.active;
+        if (s.ticket) syncTicket = s.ticket;
+      },
+    );
+
     // Listen for title updates (AI-generated or manual)
     const setupTitleListener = async () => {
       const unlisten = await listen<{ session_id: string; title: string }>(
@@ -357,10 +409,30 @@
     let unlistenClear: UnlistenFn | null = null;
     setupClearListener().then((fn) => (unlistenClear = fn));
 
+    // Listen for sync status changes
+    const setupSyncListener = async () => {
+      const unlisten = await listen<{ status: string; active: boolean }>(
+        "sync-status-changed",
+        async (event) => {
+          syncActive = event.payload.active;
+          if (event.payload.active) {
+            const s = await invoke<{ status: string; active: boolean; ticket: string | null }>("get_sync_status");
+            if (s.ticket) syncTicket = s.ticket;
+          } else {
+            syncTicket = "";
+          }
+        },
+      );
+      return unlisten;
+    };
+    let unlistenSync: UnlistenFn | null = null;
+    setupSyncListener().then((fn) => (unlistenSync = fn));
+
     return () => {
       if (unlistenTitle) unlistenTitle();
       if (unlistenDelete) unlistenDelete();
       if (unlistenClear) unlistenClear();
+      if (unlistenSync) unlistenSync();
     };
   });
 </script>
@@ -530,11 +602,16 @@
   {apiKey}
   {model}
   {loading}
+  {syncActive}
+  {syncTicket}
   onApiKeyChange={(val: string) => (apiKey = val)}
   onModelChange={configureModel}
   onClose={() => (showSettings = false)}
   onSave={configureApiKey}
   onClear={clearAllData}
+  onCreateSync={createSyncDoc}
+  onJoinSync={joinSyncDoc}
+  onStopSync={stopSync}
 />
 
 <ConfirmDialog
