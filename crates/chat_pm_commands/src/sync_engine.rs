@@ -4,14 +4,16 @@
 //! 每个状态类型携带自身所需的具体数据，消除所有 `Option` 和运行时检查。
 //! 所有底层 iroh 细节封装在内部，公共 API 不暴露任何 `iroh::` 类型。
 
-use std::sync::Arc;
+use std::{sync::Arc, time::Duration};
 
 use chat_pm_database::ChatDb;
 use chat_pm_sync::{
     DeviceId, DocTicket, SyncAnnouncement, SyncError, SyncPayload, SyncRequest,
     compute_sync_request, parse_sync_payload,
 };
-use distributed_topic_tracker::{AutoDiscoveryGossip, RecordPublisher, TopicId};
+use distributed_topic_tracker::{
+    AutoDiscoveryGossip, BootstrapConfig, DhtConfig, RecordPublisher, TopicId,
+};
 use ed25519_dalek::SigningKey;
 use iroh::{Endpoint, EndpointId, SecretKey, endpoint::presets};
 use iroh_docs::{
@@ -442,13 +444,30 @@ async fn init_docs_and_topic(
 
     let topic_id = TopicId::new(SYNC_TOPIC_NAME.to_string());
     let initial_secret = b"chatpm-sync-initial".to_vec();
-    let record_publisher = RecordPublisher::new(
-        topic_id,
-        signing_key,
-        None,
-        initial_secret,
-        distributed_topic_tracker::Config::default(),
-    );
+    let config = distributed_topic_tracker::Config::builder()
+        .dht_config(
+            DhtConfig::builder()
+                .retries(3)
+                .base_retry_interval(Duration::from_secs(5))
+                .max_retry_jitter(Duration::from_secs(10))
+                .get_timeout(Duration::from_secs(10))
+                .put_timeout(Duration::from_secs(10))
+                .build(),
+        )
+        .bootstrap_config(
+            BootstrapConfig::builder()
+                .max_bootstrap_records(5)
+                .publish_record_on_startup(true)
+                .check_older_records_first_on_startup(false)
+                .discovery_poll_interval(Duration::from_secs(5))
+                .no_peers_retry_interval(Duration::from_secs(5))
+                .per_peer_join_settle_time(Duration::from_millis(500))
+                .join_confirmation_wait_time(Duration::from_millis(5000))
+                .build(),
+        )
+        .build();
+    let record_publisher =
+        RecordPublisher::new(topic_id, signing_key, None, initial_secret, config);
 
     let topic = gossip
         .subscribe_and_join_with_auto_discovery_no_wait(record_publisher)

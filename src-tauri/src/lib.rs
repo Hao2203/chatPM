@@ -643,6 +643,14 @@ async fn publish_sync_announcement(state: State<'_, AppState>) -> Result<(), App
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() -> Result<(), Box<dyn std::error::Error>> {
     tauri::Builder::default()
+        .plugin(
+            tauri_plugin_log::Builder::new()
+                .level(tauri_plugin_log::log::LevelFilter::Info)
+                .targets([tauri_plugin_log::Target::new(
+                    tauri_plugin_log::TargetKind::Stdout,
+                )])
+                .build(),
+        )
         .plugin(tauri_plugin_opener::init())
         .setup(|app| {
             let data_dir = app.path().app_data_dir()?;

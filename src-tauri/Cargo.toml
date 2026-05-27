@@ -31,4 +31,5 @@ tokio = { workspace = true }
 anyhow = { workspace = true }
 tracing = { workspace = true }
 uuid = { workspace = true }
+tauri-plugin-log = "2"
 

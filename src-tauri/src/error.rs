@@ -55,7 +55,10 @@ impl AppError {
     }
 
     pub fn locked() -> Self {
-        Self::new(ErrorKind::Locked, "Resource temporarily unavailable, please try again later")
+        Self::new(
+            ErrorKind::Locked,
+            "Resource temporarily unavailable, please try again later",
+        )
     }
 
     pub fn not_configured() -> Self {
