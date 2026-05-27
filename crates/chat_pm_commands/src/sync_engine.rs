@@ -15,7 +15,7 @@ use distributed_topic_tracker::{
     AutoDiscoveryGossip, BootstrapConfig, DhtConfig, RecordPublisher, TopicId,
 };
 use ed25519_dalek::SigningKey;
-use iroh::{Endpoint, EndpointId, SecretKey, endpoint::presets};
+use iroh::{Endpoint, EndpointId, SecretKey, address_lookup::mdns, endpoint::presets};
 use iroh_docs::{
     DocTicket as IrohDocTicket,
     api::{
@@ -126,9 +126,11 @@ impl SyncEngine<Disconnected> {
         let secret_key_bytes = secret_key.to_bytes();
         let signing_key = SigningKey::from_bytes(&secret_key_bytes);
 
+        let mdns = mdns::MdnsAddressLookup::builder();
         let endpoint = Endpoint::builder(presets::N0)
             .secret_key(secret_key)
             .alpns(vec![SYNC_ALPN.to_vec()])
+            .address_lookup(mdns)
             .bind()
             .await
             .map_err(sync_net_err)?;
