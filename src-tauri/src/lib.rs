@@ -85,13 +85,11 @@ const DEFAULT_MODEL: &str = "deepseek-v4-flash";
 /// Load DeviceId from config or create and persist a new one.
 fn load_or_create_device_id(db: &Arc<std::sync::Mutex<ChatDb>>) -> Result<DeviceId, AppError> {
     let guard = db.lock().map_err(|_| AppError::locked())?;
-    if let Some(hex) = guard.get_config("device_id").map_err(AppError::from)? {
+    if let Some(hex) = guard.get_config("device_id")? {
         DeviceId::from_hex(&hex).map_err(|_| AppError::new(ErrorKind::Internal, "无效的设备 ID"))
     } else {
         let device_id = DeviceId::generate();
-        guard
-            .set_config("device_id", &device_id.to_hex())
-            .map_err(AppError::from)?;
+        guard.set_config("device_id", &device_id.to_hex())?;
         Ok(device_id)
     }
 }
@@ -249,7 +247,7 @@ async fn check_api_key(state: State<'_, AppState>) -> Result<bool, AppError> {
 fn create_session(state: State<'_, AppState>) -> Result<String, AppError> {
     let guard = state.service.try_lock().map_err(|_| AppError::locked())?;
     let service = guard.as_ref().ok_or_else(AppError::not_configured)?;
-    let new_session = service.create_session().map_err(AppError::from)?;
+    let new_session = service.create_session()?;
     Ok(new_session.session_id().to_string())
 }
 
@@ -349,10 +347,7 @@ async fn send_message(
         Err(e) => return Err(e.into()),
     };
 
-    let mut stream = service
-        .chat(&session, user_input)
-        .await
-        .map_err(AppError::from)?;
+    let mut stream = service.chat(&session, user_input).await?;
 
     let sid = session.session_id();
     let app_handle = app.clone();
@@ -478,7 +473,7 @@ fn clear_all_data(app: tauri::AppHandle, state: State<'_, AppState>) -> Result<(
     *state.service.try_lock().map_err(|_| AppError::locked())? = None;
 
     // 2. Drop old db connection
-    let placeholder = ChatDb::open_in_memory().map_err(AppError::from)?;
+    let placeholder = ChatDb::open_in_memory()?;
     let old_db = {
         let mut guard = state.db.try_lock().map_err(|_| AppError::locked())?;
         std::mem::replace(&mut *guard, placeholder)
@@ -491,7 +486,7 @@ fn clear_all_data(app: tauri::AppHandle, state: State<'_, AppState>) -> Result<(
     let _ = std::fs::remove_file(state.db_path.with_extension("db-shm"));
 
     // 4. Create fresh database
-    let new_db = ChatDb::open(&state.db_path).map_err(AppError::from)?;
+    let new_db = ChatDb::open(&state.db_path)?;
     *state.db.try_lock().map_err(|_| AppError::locked())? = new_db;
 
     // 5. Emit event
@@ -533,15 +528,13 @@ async fn init_and_create_sync_doc(
     let db = Arc::clone(&state.db);
     let device_id = state.device_id;
 
-    let engine = SyncEngine::init(db.clone(), SyncConfig::default(), device_id, None)
-        .await
-        .map_err(AppError::from)?;
+    let engine = SyncEngine::init(db.clone(), SyncConfig::default(), device_id, None).await?;
 
     let secret_key_bytes = engine.secret_key_bytes();
 
-    let (authoring, ticket) = engine.create_doc().await.map_err(AppError::from)?;
+    let (authoring, ticket) = engine.create_doc().await?;
 
-    let syncing = authoring.start().await.map_err(AppError::from)?;
+    let syncing = authoring.start().await?;
 
     let ticket_str = ticket.to_string();
     let _handle = syncing.start_background_sync();
@@ -549,18 +542,10 @@ async fn init_and_create_sync_doc(
     // Persist sync state to database
     {
         let guard = db.lock().map_err(|_| AppError::locked())?;
-        guard
-            .set_config("sync_state", "active")
-            .map_err(AppError::from)?;
-        guard
-            .set_config("sync_role", "creator")
-            .map_err(AppError::from)?;
-        guard
-            .set_config("sync_ticket", &ticket_str)
-            .map_err(AppError::from)?;
-        guard
-            .set_config("sync_secret_key", &bytes_to_hex(&secret_key_bytes))
-            .map_err(AppError::from)?;
+        guard.set_config("sync_state", "active")?;
+        guard.set_config("sync_role", "creator")?;
+        guard.set_config("sync_ticket", &ticket_str)?;
+        guard.set_config("sync_secret_key", &bytes_to_hex(&secret_key_bytes))?;
     }
 
     *state.sync_engine.lock().await = Some(syncing);
@@ -587,33 +572,23 @@ async fn join_sync_doc(
     let device_id = state.device_id;
     let doc_ticket = DocTicket::from_string(ticket.clone());
 
-    let engine = SyncEngine::init(db.clone(), SyncConfig::default(), device_id, None)
-        .await
-        .map_err(AppError::from)?;
+    let engine = SyncEngine::init(db.clone(), SyncConfig::default(), device_id, None).await?;
 
     let secret_key_bytes = engine.secret_key_bytes();
 
-    let joined = engine.join_doc(doc_ticket).await.map_err(AppError::from)?;
+    let joined = engine.join_doc(doc_ticket).await?;
 
-    let syncing = joined.start().await.map_err(AppError::from)?;
+    let syncing = joined.start().await?;
 
     let _handle = syncing.start_background_sync();
 
     // Persist sync state to database
     {
         let guard = db.lock().map_err(|_| AppError::locked())?;
-        guard
-            .set_config("sync_state", "active")
-            .map_err(AppError::from)?;
-        guard
-            .set_config("sync_role", "joiner")
-            .map_err(AppError::from)?;
-        guard
-            .set_config("sync_ticket", &ticket)
-            .map_err(AppError::from)?;
-        guard
-            .set_config("sync_secret_key", &bytes_to_hex(&secret_key_bytes))
-            .map_err(AppError::from)?;
+        guard.set_config("sync_state", "active")?;
+        guard.set_config("sync_role", "joiner")?;
+        guard.set_config("sync_ticket", &ticket)?;
+        guard.set_config("sync_secret_key", &bytes_to_hex(&secret_key_bytes))?;
     }
 
     *state.sync_engine.lock().await = Some(syncing);
@@ -638,8 +613,7 @@ async fn stop_sync(app: tauri::AppHandle, state: State<'_, AppState>) -> Result<
     // Mark sync as inactive in database
     {
         let db = state.db.lock().map_err(|_| AppError::locked())?;
-        db.set_config("sync_state", "inactive")
-            .map_err(AppError::from)?;
+        db.set_config("sync_state", "inactive")?;
     }
 
     let _ = app.emit(
@@ -660,7 +634,8 @@ async fn publish_sync_announcement(state: State<'_, AppState>) -> Result<(), App
     let engine = guard
         .as_ref()
         .ok_or_else(|| AppError::new(ErrorKind::Validation, "同步引擎未启动"))?;
-    engine.publish_announcement().await.map_err(AppError::from)
+    engine.publish_announcement().await?;
+    Ok(())
 }
 
 // ── Entry point ─────────────────────────────────────────────────────
