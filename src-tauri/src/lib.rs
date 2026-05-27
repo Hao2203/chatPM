@@ -9,7 +9,7 @@ use chat_pm_session::{
 use chat_pm_sync::{DeviceId, DocTicket};
 use serde::Serialize;
 use std::sync::Arc;
-use tauri::{Emitter, Manager, State};
+use tauri::{async_runtime, Emitter, Manager, State};
 use tokio::sync::Mutex;
 use tracing::{info, warn};
 
@@ -549,9 +549,15 @@ async fn init_and_create_sync_doc(
     // Persist sync state to database
     {
         let guard = db.lock().map_err(|_| AppError::locked())?;
-        guard.set_config("sync_state", "active").map_err(AppError::from)?;
-        guard.set_config("sync_role", "creator").map_err(AppError::from)?;
-        guard.set_config("sync_ticket", &ticket_str).map_err(AppError::from)?;
+        guard
+            .set_config("sync_state", "active")
+            .map_err(AppError::from)?;
+        guard
+            .set_config("sync_role", "creator")
+            .map_err(AppError::from)?;
+        guard
+            .set_config("sync_ticket", &ticket_str)
+            .map_err(AppError::from)?;
         guard
             .set_config("sync_secret_key", &bytes_to_hex(&secret_key_bytes))
             .map_err(AppError::from)?;
@@ -596,9 +602,15 @@ async fn join_sync_doc(
     // Persist sync state to database
     {
         let guard = db.lock().map_err(|_| AppError::locked())?;
-        guard.set_config("sync_state", "active").map_err(AppError::from)?;
-        guard.set_config("sync_role", "joiner").map_err(AppError::from)?;
-        guard.set_config("sync_ticket", &ticket).map_err(AppError::from)?;
+        guard
+            .set_config("sync_state", "active")
+            .map_err(AppError::from)?;
+        guard
+            .set_config("sync_role", "joiner")
+            .map_err(AppError::from)?;
+        guard
+            .set_config("sync_ticket", &ticket)
+            .map_err(AppError::from)?;
         guard
             .set_config("sync_secret_key", &bytes_to_hex(&secret_key_bytes))
             .map_err(AppError::from)?;
@@ -693,7 +705,7 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
             // Auto-restore sync engine if it was active before shutdown
             let handle = app.handle().clone();
             let restore_db = Arc::clone(&db);
-            tokio::spawn(async move {
+            async_runtime::spawn(async move {
                 restore_sync_engine(handle, restore_db, device_id).await;
             });
 
