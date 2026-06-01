@@ -1,4 +1,5 @@
 use chat_pm_commands::session::CommandError;
+use chat_pm_commands::sync_engine::SyncEngineError;
 use chat_pm_database::DbError;
 use chat_pm_deepseek::ApiError;
 use chat_pm_session::ChatError;
@@ -143,6 +144,30 @@ impl From<SyncError> for AppError {
                 kind: ErrorKind::Validation,
                 message: e.to_string(),
                 source: Some(e.into()),
+            },
+        }
+    }
+}
+
+impl From<SyncEngineError> for AppError {
+    fn from(e: SyncEngineError) -> Self {
+        match e {
+            SyncEngineError::Sync(d) => d.into(),
+            SyncEngineError::Db(d) => d.into(),
+            SyncEngineError::Network(a) => AppError {
+                kind: ErrorKind::Internal,
+                message: a.to_string(),
+                source: Some(a),
+            },
+            SyncEngineError::Serialization(a) => AppError {
+                kind: ErrorKind::Internal,
+                message: a.to_string(),
+                source: Some(a.into()),
+            },
+            SyncEngineError::Internal(a) => AppError {
+                kind: ErrorKind::Internal,
+                message: a.to_string(),
+                source: Some(a),
             },
         }
     }

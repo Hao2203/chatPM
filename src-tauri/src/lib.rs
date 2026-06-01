@@ -1,13 +1,14 @@
 use chat_pm_commands::session::{ChatConfig, ChatService, CommandError};
-use chat_pm_commands::sync_engine::{SyncConfig, SyncEngine, Syncing as SyncSyncing};
+use chat_pm_commands::sync_engine::{SyncConfig, SyncEngine, SyncTicket, Syncing as SyncSyncing};
 use chat_pm_database::ChatDb;
 use chat_pm_session::{
     message::UserInput,
     session::{NewSession, SessionId},
     ChatError,
 };
-use chat_pm_sync::{DeviceId, DocTicket};
+use chat_pm_sync::DeviceId;
 use serde::Serialize;
+use std::str::FromStr;
 use std::sync::Arc;
 use tauri::{async_runtime, Emitter, Manager, State};
 use tokio::sync::Mutex;
@@ -193,7 +194,14 @@ async fn restore_sync_engine(
         }
     };
 
-    let ticket = DocTicket::from_string(ticket_str);
+    let ticket = match SyncTicket::from_str(&ticket_str) {
+        Ok(t) => t,
+        Err(e) => {
+            warn!("恢复同步引擎失败 (ticket parse): {e}");
+            mark_sync_inactive(&db);
+            return;
+        }
+    };
     let joined = match engine.join_doc(ticket).await {
         Ok(j) => j,
         Err(e) => {
@@ -570,7 +578,7 @@ async fn join_sync_doc(
 ) -> Result<(), AppError> {
     let db = Arc::clone(&state.db);
     let device_id = state.device_id;
-    let doc_ticket = DocTicket::from_string(ticket.clone());
+    let doc_ticket = SyncTicket::from_str(&ticket)?;
 
     let engine = SyncEngine::init(db.clone(), SyncConfig::default(), device_id, None).await?;
 

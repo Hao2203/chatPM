@@ -4,12 +4,13 @@
 //! 每个状态类型携带自身所需的具体数据，消除所有 `Option` 和运行时检查。
 //! 所有底层 iroh 细节封装在内部，公共 API 不暴露任何 `iroh::` 类型。
 
-use std::{sync::Arc, time::Duration};
+use std::{str::FromStr, sync::Arc, time::Duration};
 
-use chat_pm_database::ChatDb;
+use anyhow;
+use chat_pm_database::{ChatDb, DbError};
 use chat_pm_sync::{
-    DeviceId, DocTicket, SyncAnnouncement, SyncError, SyncPayload, SyncRequest,
-    compute_sync_request, parse_sync_payload,
+    DeviceId, SyncAnnouncement, SyncError, SyncPayload, SyncRequest, compute_sync_request,
+    parse_sync_payload,
 };
 use distributed_topic_tracker::{
     AutoDiscoveryGossip, BootstrapConfig, DhtConfig, RecordPublisher, TopicId,
@@ -38,6 +39,65 @@ pub struct SyncConfig {
     /// 设备名称（可选，用于 UI 区分）
     pub device_name: Option<String>,
 }
+
+// ── SyncTicket ──────────────────────────────────────────────────────
+
+/// 同步链的准入凭证，封装 `iroh_docs::DocTicket`。
+///
+/// 拥有相同凭证的设备同步相同的记录。
+/// 第一台设备创建文档获得凭证，后续设备凭凭证加入同一同步链。
+///
+/// 不是裸 `String`，防止混入其他字符串参数；
+/// 与 `IrohDocTicket` 的转换不可失败。
+#[derive(Debug, Clone)]
+pub struct SyncTicket(IrohDocTicket);
+
+impl FromStr for SyncTicket {
+    type Err = SyncEngineError;
+    /// 从字符串解析（仅用于 API 边界接收用户输入）。
+    fn from_str(s: &str) -> Result<Self, SyncEngineError> {
+        let ticket: IrohDocTicket = s
+            .parse()
+            .map_err(|e| SyncEngineError::Internal(anyhow::anyhow!("无效的同步凭证: {e}")))?;
+        Ok(Self(ticket))
+    }
+}
+
+impl From<IrohDocTicket> for SyncTicket {
+    fn from(ticket: IrohDocTicket) -> Self {
+        Self(ticket)
+    }
+}
+
+impl From<SyncTicket> for IrohDocTicket {
+    fn from(ticket: SyncTicket) -> Self {
+        ticket.0
+    }
+}
+
+impl std::fmt::Display for SyncTicket {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.0)
+    }
+}
+
+// ── SyncEngineError ──────────────────────────────────────────────────
+
+#[derive(Debug, thiserror::Error)]
+pub enum SyncEngineError {
+    #[error("[Sync Error] {0}")]
+    Sync(#[from] SyncError),
+    #[error("[Database Error] {0}")]
+    Db(#[from] DbError),
+    #[error("[Network Error] {0:#}")]
+    Network(anyhow::Error),
+    #[error("[Serialization Error] {0}")]
+    Serialization(#[from] serde_json::Error),
+    #[error("[Internal Error] {0:#}")]
+    Internal(anyhow::Error),
+}
+
+pub type SyncEngineResult<T> = Result<T, SyncEngineError>;
 
 // ── Topic 常量 ──────────────────────────────────────────────────────
 
@@ -118,7 +178,7 @@ impl SyncEngine<Disconnected> {
         config: SyncConfig,
         device_id: DeviceId,
         secret_key: Option<[u8; 32]>,
-    ) -> Result<SyncEngine<Connected>, SyncError> {
+    ) -> SyncEngineResult<SyncEngine<Connected>> {
         let secret_key = match secret_key {
             Some(bytes) => SecretKey::from_bytes(&bytes),
             None => SecretKey::generate(),
@@ -197,8 +257,8 @@ impl SyncEngine<Syncing> {
 // ── Connected ───────────────────────────────────────────────────────
 
 impl SyncEngine<Connected> {
-    /// 发起者：创建同步文档，获得 DocTicket。
-    pub async fn create_doc(self) -> Result<(SyncEngine<Authoring>, DocTicket), SyncError> {
+    /// 发起者：创建同步文档，获得 SyncTicket。
+    pub async fn create_doc(self) -> SyncEngineResult<(SyncEngine<Authoring>, SyncTicket)> {
         let (docs, topic) = init_docs_and_topic(
             self.state.endpoint.clone(),
             self.state.gossip.clone(),
@@ -213,9 +273,7 @@ impl SyncEngine<Connected> {
             .await
             .map_err(sync_net_err)?;
 
-        let ticket_str = iroh_ticket.to_string();
-
-        info!(ticket = %ticket_str, "同步文档已创建");
+        info!(ticket = %iroh_ticket, "同步文档已创建");
 
         Ok((
             SyncEngine {
@@ -233,16 +291,13 @@ impl SyncEngine<Connected> {
                 device_id: self.device_id,
                 config: self.config,
             },
-            DocTicket::from_string(ticket_str),
+            SyncTicket::from(iroh_ticket),
         ))
     }
 
     /// 加入者：凭 ticket 加入已有同步链。
-    pub async fn join_doc(self, ticket: DocTicket) -> Result<SyncEngine<Joined>, SyncError> {
-        let iroh_ticket: IrohDocTicket = ticket
-            .as_str()
-            .parse()
-            .map_err(|e| SyncError::Other(format!("无效的同步凭证: {e}")))?;
+    pub async fn join_doc(self, ticket: SyncTicket) -> SyncEngineResult<SyncEngine<Joined>> {
+        let iroh_ticket = IrohDocTicket::from(ticket);
 
         let (docs, topic) = init_docs_and_topic(
             self.state.endpoint.clone(),
@@ -280,7 +335,7 @@ impl SyncEngine<Connected> {
 
 impl SyncEngine<Authoring> {
     /// 发起者启动同步。
-    pub async fn start(self) -> Result<SyncEngine<Syncing>, SyncError> {
+    pub async fn start(self) -> SyncEngineResult<SyncEngine<Syncing>> {
         // doc 由类型保证存在——无需运行时检查
         self.state
             .inner
@@ -306,7 +361,7 @@ impl SyncEngine<Authoring> {
 
 impl SyncEngine<Joined> {
     /// 加入者启动同步。
-    pub async fn start(self) -> Result<SyncEngine<Syncing>, SyncError> {
+    pub async fn start(self) -> SyncEngineResult<SyncEngine<Syncing>> {
         info!("同步已启动（加入者）");
 
         Ok(SyncEngine {
@@ -324,14 +379,13 @@ impl SyncEngine<Joined> {
 
 impl SyncEngine<Syncing> {
     /// 本地发生变更后，发布状态广播。
-    pub async fn publish_announcement(&self) -> Result<(), SyncError> {
+    pub async fn publish_announcement(&self) -> SyncEngineResult<()> {
         let watermarks = {
             let db = self
                 .db
                 .lock()
-                .map_err(|_| SyncError::Other("数据库锁已污染".into()))?;
-            db.build_watermarks(self.device_id)
-                .map_err(|e| SyncError::Other(e.to_string()))?
+                .map_err(|_| SyncEngineError::Internal(anyhow::anyhow!("数据库锁已污染")))?;
+            db.build_watermarks(self.device_id)?
         };
 
         let announcement = SyncAnnouncement {
@@ -339,8 +393,7 @@ impl SyncEngine<Syncing> {
             sessions: watermarks,
         };
 
-        let json = serde_json::to_vec(&announcement)
-            .map_err(|e| SyncError::Other(format!("序列化公告失败: {e}")))?;
+        let json = serde_json::to_vec(&announcement)?;
 
         // topic 由类型保证存在——无需运行时检查
         let sender = self
@@ -391,7 +444,7 @@ impl SyncEngine<Syncing> {
     }
 
     /// 停止同步，回到已连接状态。
-    pub async fn stop(self) -> Result<SyncEngine<Connected>, SyncError> {
+    pub async fn stop(self) -> SyncEngineResult<SyncEngine<Connected>> {
         info!("同步已停止");
 
         Ok(SyncEngine {
@@ -436,7 +489,7 @@ async fn init_docs_and_topic(
     endpoint: Endpoint,
     gossip: Gossip,
     signing_key: SigningKey,
-) -> Result<(Docs, distributed_topic_tracker::Topic), SyncError> {
+) -> SyncEngineResult<(Docs, distributed_topic_tracker::Topic)> {
     let blobs = iroh_blobs::store::mem::MemStore::default();
 
     let docs = Docs::memory()
@@ -610,7 +663,7 @@ async fn request_sync(
     endpoint: &Endpoint,
     peer: EndpointId,
     request: &SyncRequest,
-) -> Result<SyncPayload, SyncError> {
+) -> SyncEngineResult<SyncPayload> {
     let conn = endpoint
         .connect(peer, SYNC_ALPN)
         .await
@@ -621,8 +674,7 @@ async fn request_sync(
         payload: None,
     };
     let mut send_data = SYNC_PROTO_MAGIC.to_vec();
-    let json =
-        serde_json::to_vec(&msg).map_err(|e| SyncError::Other(format!("序列化请求失败: {e}")))?;
+    let json = serde_json::to_vec(&msg)?;
     send_data.extend_from_slice(&(json.len() as u32).to_be_bytes());
     send_data.extend_from_slice(&json);
 
@@ -630,25 +682,28 @@ async fn request_sync(
 
     send.write_all(&send_data).await.map_err(sync_net_err)?;
     send.finish()
-        .map_err(|e| SyncError::Other(format!("finish 失败: {e}")))?;
+        .map_err(|e| SyncEngineError::Network(e.into()))?;
 
     let buf = recv.read_to_end(1024 * 1024).await.map_err(sync_net_err)?;
 
     if buf.len() < 8 || &buf[..4] != SYNC_PROTO_MAGIC {
-        return Err(SyncError::Other("无效的同步响应格式".into()));
+        return Err(SyncEngineError::Internal(anyhow::anyhow!(
+            "无效的同步响应格式"
+        )));
     }
 
     let json_len = u32::from_be_bytes([buf[4], buf[5], buf[6], buf[7]]) as usize;
     if buf.len() < 8 + json_len {
-        return Err(SyncError::Other("同步响应数据不完整".into()));
+        return Err(SyncEngineError::Internal(anyhow::anyhow!(
+            "同步响应数据不完整"
+        )));
     }
 
-    let response: SyncMessage = serde_json::from_slice(&buf[8..8 + json_len])
-        .map_err(|e| SyncError::Other(format!("解析响应失败: {e}")))?;
+    let response: SyncMessage = serde_json::from_slice(&buf[8..8 + json_len])?;
 
     response
         .payload
-        .ok_or_else(|| SyncError::Other("响应中无负载数据".into()))
+        .ok_or_else(|| SyncEngineError::Internal(anyhow::anyhow!("响应中无负载数据")))
 }
 
 /// 处理接收到的同步请求。
@@ -656,31 +711,24 @@ async fn handle_sync_request(
     db: &Arc<std::sync::Mutex<ChatDb>>,
     _device_id: DeviceId,
     request: &SyncRequest,
-) -> Result<SyncPayload, SyncError> {
+) -> SyncEngineResult<SyncPayload> {
     let db = db
         .lock()
-        .map_err(|_| SyncError::Other("数据库锁已污染".into()))?;
+        .map_err(|_| SyncEngineError::Internal(anyhow::anyhow!("数据库锁已污染")))?;
 
     let mut sessions = Vec::new();
     let mut turns = Vec::new();
 
     for sid in &request.need_sessions {
-        if let Some(snapshot) = db
-            .get_session_snapshot(*sid)
-            .map_err(|e| SyncError::Other(e.to_string()))?
-        {
+        if let Some(snapshot) = db.get_session_snapshot(*sid)? {
             sessions.push(snapshot);
-            let all_turns = db
-                .get_turns_from(*sid, 0)
-                .map_err(|e| SyncError::Other(e.to_string()))?;
+            let all_turns = db.get_turns_from(*sid, 0)?;
             turns.extend(all_turns);
         }
     }
 
     for (sid, start_turn) in &request.need_turns {
-        let partial_turns = db
-            .get_turns_from(*sid, *start_turn)
-            .map_err(|e| SyncError::Other(e.to_string()))?;
+        let partial_turns = db.get_turns_from(*sid, *start_turn)?;
         turns.extend(partial_turns);
     }
 
@@ -693,7 +741,7 @@ async fn start_sync_server(
     endpoint: &Endpoint,
     db: Arc<std::sync::Mutex<ChatDb>>,
     device_id: DeviceId,
-) -> Result<(), SyncError> {
+) -> SyncEngineResult<()> {
     loop {
         let Some(incoming) = endpoint.accept().await else {
             continue;
@@ -758,6 +806,6 @@ async fn start_sync_server(
 
 // ── Error helpers ───────────────────────────────────────────────────
 
-fn sync_net_err(e: impl std::fmt::Display) -> SyncError {
-    SyncError::Other(format!("网络错误: {e}"))
+fn sync_net_err(e: impl Into<anyhow::Error>) -> SyncEngineError {
+    SyncEngineError::Network(e.into())
 }
