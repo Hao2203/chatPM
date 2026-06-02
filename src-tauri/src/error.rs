@@ -174,6 +174,19 @@ impl From<SyncEngineError> for AppError {
                 message: a.to_string(),
                 source: Some(a.into()),
             },
+            SyncEngineError::InvalidSyncFormat { .. }
+            | SyncEngineError::IncompleteSyncMessage { .. }
+            | SyncEngineError::MissingPayload { .. }
+            | SyncEngineError::MissingRequest { .. } => AppError {
+                kind: ErrorKind::Validation,
+                message: e.to_string(),
+                source: None,
+            },
+            SyncEngineError::DatabaseLock => AppError {
+                kind: ErrorKind::Internal,
+                message: e.to_string(),
+                source: None,
+            },
             SyncEngineError::Internal(a) => AppError {
                 kind: ErrorKind::Internal,
                 message: a.to_string(),

@@ -41,6 +41,21 @@ pub enum SyncEngineError {
     Network(anyhow::Error),
     #[error("[Serialization Error] {0}")]
     Serialization(#[from] serde_json::Error),
+    #[error(
+        "[Protocol Error] invalid sync message format (received {:?})",
+        received
+    )]
+    InvalidSyncFormat { received: Vec<u8> },
+    #[error(
+        "[Protocol Error] incomplete sync message (expected {expected} bytes, got {actual} bytes)"
+    )]
+    IncompleteSyncMessage { expected: usize, actual: usize },
+    #[error("[Protocol Error] response missing payload (message: {msg_text})")]
+    MissingPayload { msg_text: String },
+    #[error("[Protocol Error] request missing SyncRequest (message: {msg_text})")]
+    MissingRequest { msg_text: String },
+    #[error("[Internal Error] database lock poisoned")]
+    DatabaseLock,
     #[error("[Internal Error] {0:#}")]
     Internal(anyhow::Error),
 }
@@ -151,7 +166,7 @@ async fn do_init(
     let mdns = mdns::MdnsAddressLookup::builder();
     let endpoint = Endpoint::builder(presets::N0)
         .secret_key(secret_key)
-        .alpns(vec![SYNC_ALPN.to_vec()])
+        .alpns(vec![SYNC_ALPN.to_vec(), iroh_gossip::ALPN.to_vec()])
         .address_lookup(mdns)
         .bind()
         .await
@@ -160,6 +175,7 @@ async fn do_init(
     let gossip = Gossip::builder().spawn(endpoint.clone());
     let _router = iroh::protocol::Router::builder(endpoint.clone())
         .accept(iroh_gossip::ALPN, gossip.clone())
+        .accept(SYNC_ALPN, SyncHandler { db: db.clone() })
         .spawn();
 
     info!(node_id = %endpoint.id(), "同步引擎网络已初始化");
@@ -176,33 +192,30 @@ async fn do_init(
     } else {
         SyncTicket::new()
     };
-    let topic =
-        init_docs_and_topic(sync_ticket.clone().into(), gossip.clone(), signing_key).await?;
+    let topic = init_topic(sync_ticket.clone().into(), gossip.clone(), signing_key).await?;
 
     info!("同步已启动");
 
-    // 4. 构建水位 → 转入同步态（拿到需广播的 Announcement）
+    // 3. 构建水位 → 转入同步态（拿到需广播的 Announcement）
     let watermarks = {
-        let guard = db
-            .lock()
-            .map_err(|_| SyncEngineError::Internal(anyhow::anyhow!("数据库锁已污染")))?;
+        let guard = lock_db(&db)?;
         guard.build_watermarks(device_id)?
     };
     let (machine, announcement) =
         SyncMachine::new(device_id, config).into_syncing(sync_ticket, watermarks);
 
-    // 5. 广播
+    // 4. 广播
     let json = serde_json::to_vec(&announcement)?;
     let sender = topic.gossip_sender().await.map_err(sync_net_err)?;
     sender.broadcast(json).await.map_err(sync_net_err)?;
     info!(sessions = announcement.sessions.len(), "初始广播已发送");
 
-    // 6. 事件通道
+    // 5. 事件通道
     let (event_tx, _) = broadcast::channel::<SyncEvent>(16);
 
     let topic_for_bg = topic.clone();
 
-    // 7. 启动后台监听
+    // 6. 启动后台监听
     let bg = spawn_background(
         db.clone(),
         device_id,
@@ -229,9 +242,7 @@ async fn broadcast_current_state(
     topic: &distributed_topic_tracker::Topic,
 ) -> SyncEngineResult<()> {
     let watermarks = {
-        let guard = db
-            .lock()
-            .map_err(|_| SyncEngineError::Internal(anyhow::anyhow!("数据库锁已污染")))?;
+        let guard = lock_db(db)?;
         guard.build_watermarks(device_id)?
     };
 
@@ -295,7 +306,7 @@ fn spawn_background(
 
 // ── 内部辅助 ────────────────────────────────────────────────────────
 
-async fn init_docs_and_topic(
+async fn init_topic(
     topic_id: TopicId,
     gossip: Gossip,
     signing_key: SigningKey,
@@ -313,9 +324,9 @@ async fn init_docs_and_topic(
         )
         .bootstrap_config(
             BootstrapConfig::builder()
-                .max_bootstrap_records(5)
+                .max_bootstrap_records(2)
                 .publish_record_on_startup(true)
-                .check_older_records_first_on_startup(false)
+                .check_older_records_first_on_startup(true)
                 .discovery_poll_interval(Duration::from_secs(5))
                 .no_peers_retry_interval(Duration::from_secs(5))
                 .per_peer_join_settle_time(Duration::from_millis(500))
@@ -331,7 +342,6 @@ async fn init_docs_and_topic(
         .await
         .map_err(sync_net_err)?;
 
-    info!("gossip topic 已加入");
     Ok(topic)
 }
 
@@ -352,56 +362,17 @@ async fn run_sync_loop(
         match receiver.next().await {
             Ok(GossipEvent::Received(msg)) => {
                 match serde_json::from_slice::<SyncAnnouncement>(&msg.content) {
-                    Ok(remote_announcement) => {
-                        if remote_announcement.device_id == device_id {
-                            continue;
-                        }
-                        info!(from_device = %remote_announcement.device_id, sessions = remote_announcement.sessions.len(), "收到远程同步公告");
-                        let local_watermarks = {
-                            let db_guard = match db.lock() {
-                                Ok(g) => g,
-                                Err(e) => {
-                                    error!("数据库锁已污染: {e}");
-                                    continue;
-                                }
-                            };
-                            match db_guard.build_watermarks(device_id) {
-                                Ok(w) => w,
-                                Err(e) => {
-                                    error!(%e, "构建水位失败");
-                                    continue;
-                                }
-                            }
-                        };
-                        let request = compute_sync_request(&local_watermarks, &remote_announcement);
-                        if request.need_sessions.is_empty() && request.need_turns.is_empty() {
-                            continue;
-                        }
-                        info!(
-                            need_sessions = request.need_sessions.len(),
-                            need_turns = request.need_turns.len(),
-                            "需要同步数据"
-                        );
-                        match request_sync(&endpoint, msg.delivered_from, &request).await {
-                            Ok(payload) => match parse_sync_payload(payload) {
-                                Ok(verified) => {
-                                    let db_guard = match db.lock() {
-                                        Ok(g) => g,
-                                        Err(e) => {
-                                            error!("数据库锁已污染: {e}");
-                                            continue;
-                                        }
-                                    };
-                                    match db_guard.apply_verified_payload(&verified) {
-                                        Ok(count) => {
-                                            info!(turns_written = count, "同步数据已写入本地数据库")
-                                        }
-                                        Err(e) => error!(%e, "写入同步数据失败"),
-                                    }
-                                }
-                                Err(e) => error!(%e, "验证同步负载失败"),
-                            },
-                            Err(e) => error!(%e, "同步请求失败"),
+                    Ok(announcement) => {
+                        if let Err(e) = process_remote_announcement(
+                            &db,
+                            device_id,
+                            &endpoint,
+                            msg.delivered_from,
+                            announcement,
+                        )
+                        .await
+                        {
+                            error!(%e, "处理远程公告失败");
                         }
                     }
                     Err(e) => warn!(%e, "解析远程公告失败"),
@@ -421,12 +392,101 @@ async fn run_sync_loop(
     }
 }
 
+async fn process_remote_announcement(
+    db: &Arc<std::sync::Mutex<ChatDb>>,
+    device_id: DeviceId,
+    endpoint: &Endpoint,
+    from_peer: EndpointId,
+    announcement: SyncAnnouncement,
+) -> SyncEngineResult<()> {
+    if announcement.device_id == device_id {
+        return Ok(());
+    }
+    info!(
+        from_device = %announcement.device_id,
+        sessions = announcement.sessions.len(),
+        "收到远程同步公告"
+    );
+
+    let local_watermarks = {
+        let guard = lock_db(db)?;
+        guard.build_watermarks(device_id)?
+    };
+
+    let request = compute_sync_request(&local_watermarks, &announcement);
+    if request.need_sessions.is_empty() && request.need_turns.is_empty() {
+        return Ok(());
+    }
+    info!(
+        need_sessions = request.need_sessions.len(),
+        need_turns = request.need_turns.len(),
+        "需要同步数据"
+    );
+
+    let payload = request_sync(endpoint, from_peer, &request).await?;
+    let verified = parse_sync_payload(payload)?;
+
+    let guard = lock_db(db)?;
+    let count = guard.apply_verified_payload(&verified)?;
+    info!(turns_written = count, "同步数据已写入本地数据库");
+    Ok(())
+}
+
 // ── 传输层 ──────────────────────────────────────────────────────────
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct SyncMessage {
     request: Option<SyncRequest>,
     payload: Option<SyncPayload>,
+}
+
+impl SyncMessage {
+    /// 编码为线格式：魔数 + 4 字节大端长度 + JSON。
+    fn to_wire(&self) -> SyncEngineResult<Vec<u8>> {
+        let json = serde_json::to_vec(self)?;
+        let mut data = SYNC_PROTO_MAGIC.to_vec();
+        data.extend_from_slice(&(json.len() as u32).to_be_bytes());
+        data.extend_from_slice(&json);
+        Ok(data)
+    }
+
+    /// 从线格式解码。校验魔数和长度前缀。
+    fn from_wire(buf: &[u8]) -> SyncEngineResult<Self> {
+        if buf.len() < 8 || &buf[..4] != SYNC_PROTO_MAGIC {
+            let received = buf[..buf.len().min(64)].to_vec();
+            return Err(SyncEngineError::InvalidSyncFormat { received });
+        }
+        let json_len = u32::from_be_bytes([buf[4], buf[5], buf[6], buf[7]]) as usize;
+        if buf.len() < 8 + json_len {
+            return Err(SyncEngineError::IncompleteSyncMessage {
+                expected: 8 + json_len,
+                actual: buf.len(),
+            });
+        }
+        let msg: Self = serde_json::from_slice(&buf[8..8 + json_len])?;
+        Ok(msg)
+    }
+
+    fn into_request(self) -> SyncEngineResult<SyncRequest> {
+        let msg_text =
+            serde_json::to_string(&self).unwrap_or_else(|e| format!("(serialization failed: {e})"));
+        self.request
+            .ok_or(SyncEngineError::MissingRequest { msg_text })
+    }
+
+    fn into_payload(self) -> SyncEngineResult<SyncPayload> {
+        let msg_text =
+            serde_json::to_string(&self).unwrap_or_else(|e| format!("(serialization failed: {e})"));
+        self.payload
+            .ok_or(SyncEngineError::MissingPayload { msg_text })
+    }
+}
+
+/// 锁定数据库，PoisonError 转 `DatabaseLock`。
+fn lock_db(
+    db: &Arc<std::sync::Mutex<ChatDb>>,
+) -> SyncEngineResult<std::sync::MutexGuard<'_, ChatDb>> {
+    db.lock().map_err(|_| SyncEngineError::DatabaseLock)
 }
 
 async fn request_sync(
@@ -443,10 +503,7 @@ async fn request_sync(
         request: Some(request.clone()),
         payload: None,
     };
-    let mut send_data = SYNC_PROTO_MAGIC.to_vec();
-    let json = serde_json::to_vec(&msg)?;
-    send_data.extend_from_slice(&(json.len() as u32).to_be_bytes());
-    send_data.extend_from_slice(&json);
+    let send_data = msg.to_wire()?;
 
     let (mut send, mut recv) = conn.open_bi().await.map_err(sync_net_err)?;
     send.write_all(&send_data).await.map_err(sync_net_err)?;
@@ -454,23 +511,101 @@ async fn request_sync(
         .map_err(|e| SyncEngineError::Network(e.into()))?;
 
     let buf = recv.read_to_end(1024 * 1024).await.map_err(sync_net_err)?;
-    if buf.len() < 8 || &buf[..4] != SYNC_PROTO_MAGIC {
-        return Err(SyncEngineError::Internal(anyhow::anyhow!(
-            "无效的同步响应格式"
-        )));
-    }
-    let json_len = u32::from_be_bytes([buf[4], buf[5], buf[6], buf[7]]) as usize;
-    if buf.len() < 8 + json_len {
-        return Err(SyncEngineError::Internal(anyhow::anyhow!(
-            "同步响应数据不完整"
-        )));
-    }
-    let response: SyncMessage = serde_json::from_slice(&buf[8..8 + json_len])?;
-    response
-        .payload
-        .ok_or_else(|| SyncEngineError::Internal(anyhow::anyhow!("响应中无负载数据")))
+    let response = SyncMessage::from_wire(&buf)?;
+    let payload = response.into_payload()?;
+    Ok(payload)
 }
 
 fn sync_net_err(e: impl Into<anyhow::Error>) -> SyncEngineError {
     SyncEngineError::Network(e.into())
+}
+
+#[derive(Debug, Clone)]
+struct SyncHandler {
+    db: Arc<std::sync::Mutex<ChatDb>>,
+}
+
+impl iroh::protocol::ProtocolHandler for SyncHandler {
+    async fn accept(
+        &self,
+        connection: iroh::endpoint::Connection,
+    ) -> Result<(), iroh::protocol::AcceptError> {
+        let db = self.db.clone();
+        tokio::spawn(async move {
+            if let Err(e) = handle_sync_connection(db, connection).await {
+                warn!(%e, "处理同步连接失败");
+            }
+        });
+        Ok(())
+    }
+}
+
+/// 处理入站同步连接：读取 SyncRequest → 查询数据库组装 SyncPayload → 写回响应。
+async fn handle_sync_connection(
+    db: Arc<std::sync::Mutex<ChatDb>>,
+    connection: iroh::endpoint::Connection,
+) -> SyncEngineResult<()> {
+    let (mut send, mut recv) = connection.accept_bi().await.map_err(sync_net_err)?;
+
+    // 读取请求
+    let buf = recv.read_to_end(1024 * 1024).await.map_err(sync_net_err)?;
+    let msg = SyncMessage::from_wire(&buf)?;
+    let request = msg.into_request()?;
+
+    info!(
+        need_sessions = request.need_sessions.len(),
+        need_turns = request.need_turns.len(),
+        "收到同步请求"
+    );
+
+    // 组装响应
+    let payload = build_sync_payload(&db, &request)?;
+
+    info!(
+        sessions = payload.sessions.len(),
+        turns = payload.turns.len(),
+        "组装同步响应"
+    );
+
+    // 写回响应
+    let response = SyncMessage {
+        request: None,
+        payload: Some(payload),
+    };
+    let send_data = response.to_wire()?;
+
+    send.write_all(&send_data).await.map_err(sync_net_err)?;
+    send.finish()
+        .map_err(|e| SyncEngineError::Network(e.into()))?;
+
+    info!("同步响应已发送");
+    Ok(())
+}
+
+/// 根据 SyncRequest 从数据库查询并组装 SyncPayload。
+fn build_sync_payload(
+    db: &Arc<std::sync::Mutex<ChatDb>>,
+    request: &SyncRequest,
+) -> SyncEngineResult<SyncPayload> {
+    let guard = lock_db(db)?;
+
+    let mut sessions = Vec::new();
+    let mut turns = Vec::new();
+
+    // 请求完整会话：包含会话快照 + 所有轮次
+    for session_id in &request.need_sessions {
+        if let Some(snapshot) = guard.get_session_snapshot(*session_id)? {
+            sessions.push(snapshot);
+            let session_turns = guard.get_turns_from(*session_id, 1)?;
+            turns.extend(session_turns);
+        }
+    }
+
+    // 请求增量轮次：仅获取指定起始位置之后的轮次
+    for (session_id, start_turn) in &request.need_turns {
+        let session_turns = guard.get_turns_from(*session_id, *start_turn)?;
+        turns.extend(session_turns);
+    }
+
+    Ok(SyncPayload { sessions, turns })
 }
