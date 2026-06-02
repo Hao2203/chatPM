@@ -1,5 +1,5 @@
 use chat_pm_commands::session::{ChatConfig, ChatService, CommandError};
-use chat_pm_commands::sync_engine::{SyncConfig, SyncEngine, SyncTicket, Syncing as SyncSyncing};
+use chat_pm_commands::sync_engine::{SyncConfig, SyncEngine, SyncTicket};
 use chat_pm_database::ChatDb;
 use chat_pm_session::{
     message::UserInput,
@@ -23,7 +23,7 @@ struct AppState {
     db: Arc<std::sync::Mutex<ChatDb>>,
     db_path: std::path::PathBuf,
     service: Mutex<Option<ChatService>>,
-    sync_engine: Mutex<Option<SyncEngine<SyncSyncing>>>,
+    sync_engine: Mutex<Option<SyncEngine>>,
     device_id: DeviceId,
 }
 
@@ -178,22 +178,6 @@ async fn restore_sync_engine(
 
     info!("正在恢复同步引擎...");
 
-    let engine = match SyncEngine::init(
-        db.clone(),
-        SyncConfig::default(),
-        device_id,
-        Some(secret_key_bytes),
-    )
-    .await
-    {
-        Ok(e) => e,
-        Err(e) => {
-            warn!("恢复同步引擎失败 (init): {e}");
-            mark_sync_inactive(&db);
-            return;
-        }
-    };
-
     let ticket = match SyncTicket::from_str(&ticket_str) {
         Ok(t) => t,
         Err(e) => {
@@ -202,28 +186,26 @@ async fn restore_sync_engine(
             return;
         }
     };
-    let joined = match engine.join_doc(ticket).await {
-        Ok(j) => j,
+
+    let engine = match SyncEngine::join(
+        db.clone(),
+        SyncConfig::default(),
+        device_id,
+        Some(secret_key_bytes),
+        ticket,
+    )
+    .await
+    {
+        Ok(e) => e,
         Err(e) => {
-            warn!("恢复同步引擎失败 (join): {e}");
+            warn!("恢复同步引擎失败: {e}");
             mark_sync_inactive(&db);
             return;
         }
     };
-
-    let syncing = match joined.start().await {
-        Ok(s) => s,
-        Err(e) => {
-            warn!("恢复同步引擎失败 (start): {e}");
-            mark_sync_inactive(&db);
-            return;
-        }
-    };
-
-    let _handle = syncing.start_background_sync();
 
     let state = app.state::<AppState>();
-    *state.sync_engine.lock().await = Some(syncing);
+    *state.sync_engine.lock().await = Some(engine);
 
     info!("同步引擎已自动恢复");
 
@@ -536,38 +518,26 @@ async fn init_and_create_sync_doc(
     let db = Arc::clone(&state.db);
     let device_id = state.device_id;
 
-    let engine = SyncEngine::init(db.clone(), SyncConfig::default(), device_id, None).await?;
-
+    let engine =
+        SyncEngine::create(db.clone(), SyncConfig::default(), device_id, None).await?;
+    let ticket = engine.ticket().to_string();
     let secret_key_bytes = engine.secret_key_bytes();
 
-    let (authoring, ticket) = engine.create_doc().await?;
-
-    let syncing = authoring.start().await?;
-
-    let ticket_str = ticket.to_string();
-    let _handle = syncing.start_background_sync();
-
-    // Persist sync state to database
     {
         let guard = db.lock().map_err(|_| AppError::locked())?;
         guard.set_config("sync_state", "active")?;
         guard.set_config("sync_role", "creator")?;
-        guard.set_config("sync_ticket", &ticket_str)?;
+        guard.set_config("sync_ticket", &ticket)?;
         guard.set_config("sync_secret_key", &bytes_to_hex(&secret_key_bytes))?;
     }
 
-    *state.sync_engine.lock().await = Some(syncing);
+    *state.sync_engine.lock().await = Some(engine);
 
-    let _ = app.emit(
-        "sync-status-changed",
-        SyncStatusPayload {
-            status: "syncing".to_string(),
-            active: true,
-            ticket: None,
-        },
-    );
+    let _ = app.emit("sync-status-changed", SyncStatusPayload {
+        status: "syncing".to_string(), active: true, ticket: None,
+    });
 
-    Ok(ticket_str)
+    Ok(ticket)
 }
 
 #[tauri::command]
@@ -580,17 +550,10 @@ async fn join_sync_doc(
     let device_id = state.device_id;
     let doc_ticket = SyncTicket::from_str(&ticket)?;
 
-    let engine = SyncEngine::init(db.clone(), SyncConfig::default(), device_id, None).await?;
-
+    let engine =
+        SyncEngine::join(db.clone(), SyncConfig::default(), device_id, None, doc_ticket).await?;
     let secret_key_bytes = engine.secret_key_bytes();
 
-    let joined = engine.join_doc(doc_ticket).await?;
-
-    let syncing = joined.start().await?;
-
-    let _handle = syncing.start_background_sync();
-
-    // Persist sync state to database
     {
         let guard = db.lock().map_err(|_| AppError::locked())?;
         guard.set_config("sync_state", "active")?;
@@ -599,16 +562,11 @@ async fn join_sync_doc(
         guard.set_config("sync_secret_key", &bytes_to_hex(&secret_key_bytes))?;
     }
 
-    *state.sync_engine.lock().await = Some(syncing);
+    *state.sync_engine.lock().await = Some(engine);
 
-    let _ = app.emit(
-        "sync-status-changed",
-        SyncStatusPayload {
-            status: "syncing".to_string(),
-            active: true,
-            ticket: None,
-        },
-    );
+    let _ = app.emit("sync-status-changed", SyncStatusPayload {
+        status: "syncing".to_string(), active: true, ticket: None,
+    });
 
     Ok(())
 }

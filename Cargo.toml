@@ -15,6 +15,7 @@ dbg_macro = "warn"
 [workspace.dependencies]
 anyhow = "1"
 async-trait = "0.1"
+base64ct = "1.8"
 chat_pm_session = { path = "crates/chat_pm_session" }
 chat_pm_database = { path = "crates/chat_pm_database" }
 chat_pm_deepseek = { path = "crates/chat_pm_deepseek" }
@@ -32,7 +33,6 @@ tracing = { version = "0.1", features = ["log"] }
 http = { version = "1" }
 iroh = { version = "0.98", features = ["address-lookup-mdns"] }
 iroh-gossip = "0.98"
-iroh-docs = "0.98"
 rusqlite = { version = "0.37", features = ["bundled", "uuid"] }
 reqwest = { version = "0.13", features = ["json", "stream"] }
 secrecy = "0.10"

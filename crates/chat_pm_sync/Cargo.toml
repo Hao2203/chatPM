@@ -4,15 +4,16 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
+base64ct = { workspace = true }
 chat_pm_session = { workspace = true }
 chrono = { workspace = true }
+distributed-topic-tracker = { workspace = true }
 serde = { workspace = true }
 thiserror = { workspace = true }
 uuid = { workspace = true }
 
 [dev-dependencies]
 iroh = { workspace = true }
-iroh-docs = { workspace = true }
 serde_json = { workspace = true }
 
 

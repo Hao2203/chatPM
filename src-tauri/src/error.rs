@@ -3,7 +3,7 @@ use chat_pm_commands::sync_engine::SyncEngineError;
 use chat_pm_database::DbError;
 use chat_pm_deepseek::ApiError;
 use chat_pm_session::ChatError;
-use chat_pm_sync::SyncError;
+use chat_pm_sync::{SyncError, SyncTicketError};
 use serde::Serialize;
 
 /// AppError 的错误类别。
@@ -80,6 +80,16 @@ impl std::error::Error for AppError {
 }
 
 // ── From 转换：下层错误类型 → AppError ────────────────────────────
+
+impl From<SyncTicketError> for AppError {
+    fn from(e: SyncTicketError) -> Self {
+        Self {
+            kind: ErrorKind::Validation,
+            message: e.to_string(),
+            source: None,
+        }
+    }
+}
 
 impl From<ChatError> for AppError {
     fn from(e: ChatError) -> Self {

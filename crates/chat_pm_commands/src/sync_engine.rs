@@ -1,85 +1,33 @@
 //! 同步引擎——基于 iroh 的 P2P 设备间会话同步。
 //!
-//! `SyncEngine<S>` 是同步功能的核心编排器，通过类型状态机驱动完整生命周期。
-//! 每个状态类型携带自身所需的具体数据，消除所有 `Option` 和运行时检查。
-//! 所有底层 iroh 细节封装在内部，公共 API 不暴露任何 `iroh::` 类型。
+//! `SyncEngine` 是非泛型 I/O 容器。纯类型状态机由
+//! `chat_pm_sync::sync_machine::SyncMachine<S>` 提供，`SyncEngine` 在
+//! init 过程中驱动状态转换，完成后始终处于 Syncing 态。
+//!
+//! init 完成后立即广播自身状态；邻居上线时通过 [`events()`] 通道通知上层。
 
-use std::{str::FromStr, sync::Arc, time::Duration};
+use std::{sync::Arc, time::Duration};
 
 use anyhow;
 use chat_pm_database::{ChatDb, DbError};
 use chat_pm_sync::{
     DeviceId, SyncAnnouncement, SyncError, SyncPayload, SyncRequest, compute_sync_request,
     parse_sync_payload,
+    sync_machine::{SyncMachine, SyncSyncing},
 };
 use distributed_topic_tracker::{
     AutoDiscoveryGossip, BootstrapConfig, DhtConfig, RecordPublisher, TopicId,
 };
 use ed25519_dalek::SigningKey;
 use iroh::{Endpoint, EndpointId, SecretKey, address_lookup::mdns, endpoint::presets};
-use iroh_docs::{
-    DocTicket as IrohDocTicket,
-    api::{
-        Doc,
-        protocol::{AddrInfoOptions, ShareMode},
-    },
-    protocol::Docs,
-};
 use iroh_gossip::{api::Event as GossipEvent, net::Gossip};
 use serde::{Deserialize, Serialize};
+use tokio::sync::broadcast;
 use tracing::{error, info, warn};
 
-// ── SyncConfig ──────────────────────────────────────────────────────
+// ── 重导出 ──────────────────────────────────────────────────────────
 
-/// 同步引擎配置。
-#[derive(Debug, Clone, Default)]
-pub struct SyncConfig {
-    /// iroh 端点绑定的端口（None = 系统自动分配）
-    pub bind_port: Option<u16>,
-    /// 设备名称（可选，用于 UI 区分）
-    pub device_name: Option<String>,
-}
-
-// ── SyncTicket ──────────────────────────────────────────────────────
-
-/// 同步链的准入凭证，封装 `iroh_docs::DocTicket`。
-///
-/// 拥有相同凭证的设备同步相同的记录。
-/// 第一台设备创建文档获得凭证，后续设备凭凭证加入同一同步链。
-///
-/// 不是裸 `String`，防止混入其他字符串参数；
-/// 与 `IrohDocTicket` 的转换不可失败。
-#[derive(Debug, Clone)]
-pub struct SyncTicket(IrohDocTicket);
-
-impl FromStr for SyncTicket {
-    type Err = SyncEngineError;
-    /// 从字符串解析（仅用于 API 边界接收用户输入）。
-    fn from_str(s: &str) -> Result<Self, SyncEngineError> {
-        let ticket: IrohDocTicket = s
-            .parse()
-            .map_err(|e| SyncEngineError::Internal(anyhow::anyhow!("无效的同步凭证: {e}")))?;
-        Ok(Self(ticket))
-    }
-}
-
-impl From<IrohDocTicket> for SyncTicket {
-    fn from(ticket: IrohDocTicket) -> Self {
-        Self(ticket)
-    }
-}
-
-impl From<SyncTicket> for IrohDocTicket {
-    fn from(ticket: SyncTicket) -> Self {
-        ticket.0
-    }
-}
-
-impl std::fmt::Display for SyncTicket {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}", self.0)
-    }
-}
+pub use chat_pm_sync::sync_machine::{SyncConfig, SyncTicket};
 
 // ── SyncEngineError ──────────────────────────────────────────────────
 
@@ -99,370 +47,209 @@ pub enum SyncEngineError {
 
 pub type SyncEngineResult<T> = Result<T, SyncEngineError>;
 
-// ── Topic 常量 ──────────────────────────────────────────────────────
+// ── 常量 ────────────────────────────────────────────────────────────
 
-/// 同步 topic 名称（用于 distributed-topic-tracker）
-const SYNC_TOPIC_NAME: &str = "chatpm-sync-v1";
-
-/// 直连同步请求的 ALPN
 const SYNC_ALPN: &[u8] = b"/chatpm/sync-req/1";
-
-/// 同步传输协议版本 magic（前 4 字节）
 const SYNC_PROTO_MAGIC: &[u8; 4] = b"cSPM";
 
-// ── State types (each carries its own concrete data) ────────────────
+// ── 内部 I/O 资源 ───────────────────────────────────────────────────
 
-/// 未连接网络——不持有任何网络资源。
-pub struct Disconnected;
-
-/// 已加入 gossip 网络——持有端点、gossip 实例和签名密钥。
-/// 此时尚未创建或加入同步文档。
-pub struct Connected {
+#[allow(dead_code)]
+struct NetRes {
     endpoint: Endpoint,
     gossip: Gossip,
     signing_key: SigningKey,
 }
 
-/// Authoring / Joined / Syncing 共享的内部数据——三者均持有完整的
-/// 网络连接 + 文档 + gossip topic，差异仅在于允许的操作不同。
-struct SyncedInner {
-    endpoint: Endpoint,
-    gossip: Gossip,
-    signing_key: SigningKey,
-    #[allow(dead_code)]
-    docs: Docs,
-    doc: Doc,
+#[allow(dead_code)]
+struct DocRes {
     topic: distributed_topic_tracker::Topic,
 }
 
-/// 已创建同步文档，持有 ticket——等待调用 `start()` 启动同步。
-pub struct Authoring {
-    inner: SyncedInner,
-}
+// ── 事件 ────────────────────────────────────────────────────────────
 
-/// 已凭 ticket 加入同步文档——等待调用 `start()` 启动同步。
-pub struct Joined {
-    inner: SyncedInner,
-}
-
-/// 正在同步中——可以发布公告、接收远程数据。
-pub struct Syncing {
-    inner: SyncedInner,
+/// 同步引擎事件。
+#[derive(Debug, Clone)]
+pub enum SyncEvent {
+    /// 邻居上线，建议调用 `publish_announcement` 广播自身状态
+    NeighborUp,
 }
 
 // ── SyncEngine ──────────────────────────────────────────────────────
 
-/// 同步引擎，`S` 为当前生命周期状态（同时携带该状态的具体数据）。
-///
-/// 状态转移：
-/// ```text
-/// Disconnected → init() → Connected → create_doc() → Authoring → start() → Syncing
-///                                     → join_doc()  → Joined   → start() → Syncing
-/// Syncing → stop() → Connected
-/// ```
-pub struct SyncEngine<S> {
-    state: S,
+/// 同步引擎——非泛型，init 后始终处于 Syncing 状态。
+pub struct SyncEngine {
+    machine: SyncMachine<SyncSyncing>,
+    net: NetRes,
+    doc: DocRes,
     db: Arc<std::sync::Mutex<ChatDb>>,
-    device_id: DeviceId,
-    config: SyncConfig,
+    event_tx: broadcast::Sender<SyncEvent>,
+    _bg: BackgroundSyncHandle,
 }
 
-// ── Disconnected ────────────────────────────────────────────────────
-
-impl SyncEngine<Disconnected> {
-    /// 初始化网络连接：创建端点、加入 gossip 网络。
-    ///
-    /// 可通过 `secret_key` 恢复之前的节点身份（用于重启后恢复同步）。
-    pub async fn init(
+impl SyncEngine {
+    /// 创建新同步链——创建文档后立即广播自身状态。
+    pub async fn create(
         db: Arc<std::sync::Mutex<ChatDb>>,
         config: SyncConfig,
         device_id: DeviceId,
         secret_key: Option<[u8; 32]>,
-    ) -> SyncEngineResult<SyncEngine<Connected>> {
-        let secret_key = match secret_key {
-            Some(bytes) => SecretKey::from_bytes(&bytes),
-            None => SecretKey::generate(),
-        };
-        let secret_key_bytes = secret_key.to_bytes();
-        let signing_key = SigningKey::from_bytes(&secret_key_bytes);
-
-        let mdns = mdns::MdnsAddressLookup::builder();
-        let endpoint = Endpoint::builder(presets::N0)
-            .secret_key(secret_key)
-            .alpns(vec![SYNC_ALPN.to_vec()])
-            .address_lookup(mdns)
-            .bind()
-            .await
-            .map_err(sync_net_err)?;
-
-        let gossip = Gossip::builder().spawn(endpoint.clone());
-
-        let _router = iroh::protocol::Router::builder(endpoint.clone())
-            .accept(iroh_gossip::ALPN, gossip.clone())
-            .spawn();
-
-        info!(
-            node_id = %endpoint.id(),
-            "同步引擎网络已初始化"
-        );
-
-        Ok(SyncEngine {
-            state: Connected {
-                endpoint,
-                gossip,
-                signing_key,
-            },
-            db,
-            device_id,
-            config,
-        })
+    ) -> SyncEngineResult<Self> {
+        do_init(db, config, device_id, secret_key, None).await
     }
-}
 
-// ── secret_key_bytes helper macro ───────────────────────────────────
+    /// 凭 ticket 加入已有同步链——加入后立即广播自身状态。
+    pub async fn join(
+        db: Arc<std::sync::Mutex<ChatDb>>,
+        config: SyncConfig,
+        device_id: DeviceId,
+        secret_key: Option<[u8; 32]>,
+        ticket: SyncTicket,
+    ) -> SyncEngineResult<Self> {
+        do_init(db, config, device_id, secret_key, Some(ticket)).await
+    }
 
-macro_rules! impl_secret_key_bytes {
-    ($($state:ident),+ $(,)?) => {
-        $(
-            impl SyncEngine<$state> {
-                /// 返回 `secret_key` 的字节表示（用于重启后恢复节点身份）。
-                pub fn secret_key_bytes(&self) -> [u8; 32] {
-                    self.state.signing_key.to_bytes()
-                }
-            }
-        )+
-    };
-}
+    pub fn ticket(&self) -> &SyncTicket {
+        self.machine.ticket()
+    }
 
-impl_secret_key_bytes!(Connected);
+    pub fn device_id(&self) -> DeviceId {
+        self.machine.device_id
+    }
 
-impl SyncEngine<Authoring> {
     pub fn secret_key_bytes(&self) -> [u8; 32] {
-        self.state.inner.signing_key.to_bytes()
-    }
-}
-
-impl SyncEngine<Joined> {
-    pub fn secret_key_bytes(&self) -> [u8; 32] {
-        self.state.inner.signing_key.to_bytes()
-    }
-}
-
-impl SyncEngine<Syncing> {
-    pub fn secret_key_bytes(&self) -> [u8; 32] {
-        self.state.inner.signing_key.to_bytes()
-    }
-}
-
-// ── Connected ───────────────────────────────────────────────────────
-
-impl SyncEngine<Connected> {
-    /// 发起者：创建同步文档，获得 SyncTicket。
-    pub async fn create_doc(self) -> SyncEngineResult<(SyncEngine<Authoring>, SyncTicket)> {
-        let (docs, topic) = init_docs_and_topic(
-            self.state.endpoint.clone(),
-            self.state.gossip.clone(),
-            self.state.signing_key.clone(),
-        )
-        .await?;
-
-        let doc = docs.create().await.map_err(sync_net_err)?;
-
-        let iroh_ticket = doc
-            .share(ShareMode::Write, AddrInfoOptions::Id)
-            .await
-            .map_err(sync_net_err)?;
-
-        info!(ticket = %iroh_ticket, "同步文档已创建");
-
-        Ok((
-            SyncEngine {
-                state: Authoring {
-                    inner: SyncedInner {
-                        endpoint: self.state.endpoint,
-                        gossip: self.state.gossip,
-                        signing_key: self.state.signing_key,
-                        docs,
-                        doc,
-                        topic,
-                    },
-                },
-                db: self.db,
-                device_id: self.device_id,
-                config: self.config,
-            },
-            SyncTicket::from(iroh_ticket),
-        ))
+        self.net.signing_key.to_bytes()
     }
 
-    /// 加入者：凭 ticket 加入已有同步链。
-    pub async fn join_doc(self, ticket: SyncTicket) -> SyncEngineResult<SyncEngine<Joined>> {
-        let iroh_ticket = IrohDocTicket::from(ticket);
-
-        let (docs, topic) = init_docs_and_topic(
-            self.state.endpoint.clone(),
-            self.state.gossip.clone(),
-            self.state.signing_key.clone(),
-        )
-        .await?;
-
-        let (doc, _events) = docs
-            .import_and_subscribe(iroh_ticket)
-            .await
-            .map_err(sync_net_err)?;
-
-        info!(doc_id = %doc.id(), "已加入同步文档");
-
-        Ok(SyncEngine {
-            state: Joined {
-                inner: SyncedInner {
-                    endpoint: self.state.endpoint,
-                    gossip: self.state.gossip,
-                    signing_key: self.state.signing_key,
-                    docs,
-                    doc,
-                    topic,
-                },
-            },
-            db: self.db,
-            device_id: self.device_id,
-            config: self.config,
-        })
-    }
-}
-
-// ── Authoring ───────────────────────────────────────────────────────
-
-impl SyncEngine<Authoring> {
-    /// 发起者启动同步。
-    pub async fn start(self) -> SyncEngineResult<SyncEngine<Syncing>> {
-        // doc 由类型保证存在——无需运行时检查
-        self.state
-            .inner
-            .doc
-            .start_sync(vec![])
-            .await
-            .map_err(sync_net_err)?;
-
-        info!("同步已启动（发起者）");
-
-        Ok(SyncEngine {
-            state: Syncing {
-                inner: self.state.inner,
-            },
-            db: self.db,
-            device_id: self.device_id,
-            config: self.config,
-        })
-    }
-}
-
-// ── Joined ──────────────────────────────────────────────────────────
-
-impl SyncEngine<Joined> {
-    /// 加入者启动同步。
-    pub async fn start(self) -> SyncEngineResult<SyncEngine<Syncing>> {
-        info!("同步已启动（加入者）");
-
-        Ok(SyncEngine {
-            state: Syncing {
-                inner: self.state.inner,
-            },
-            db: self.db,
-            device_id: self.device_id,
-            config: self.config,
-        })
-    }
-}
-
-// ── Syncing ─────────────────────────────────────────────────────────
-
-impl SyncEngine<Syncing> {
-    /// 本地发生变更后，发布状态广播。
+    /// 广播自身状态（创建/恢复时由 init 自动调用，邻居上线后上层主动调用）。
     pub async fn publish_announcement(&self) -> SyncEngineResult<()> {
-        let watermarks = {
-            let db = self
-                .db
-                .lock()
-                .map_err(|_| SyncEngineError::Internal(anyhow::anyhow!("数据库锁已污染")))?;
-            db.build_watermarks(self.device_id)?
-        };
-
-        let announcement = SyncAnnouncement {
-            device_id: self.device_id,
-            sessions: watermarks,
-        };
-
-        let json = serde_json::to_vec(&announcement)?;
-
-        // topic 由类型保证存在——无需运行时检查
-        let sender = self
-            .state
-            .inner
-            .topic
-            .gossip_sender()
-            .await
-            .map_err(sync_net_err)?;
-
-        sender.broadcast(json).await.map_err(sync_net_err)?;
-
-        info!(
-            device_id = %self.device_id,
-            sessions = announcement.sessions.len(),
-            "同步公告已发布"
-        );
-
-        Ok(())
+        broadcast_current_state(&self.db, self.machine.device_id, &self.doc.topic).await
     }
 
-    /// 开启后台同步循环（接收端逻辑）。
-    #[must_use]
-    pub fn start_background_sync(&self) -> BackgroundSyncHandle {
-        let db = Arc::clone(&self.db);
-        let device_id = self.device_id;
-        let endpoint = self.state.inner.endpoint.clone();
-        // topic 和 doc 由类型保证存在
-        let topic = self.state.inner.topic.clone();
-        let doc = self.state.inner.doc.clone();
-
-        let (cancel_tx, cancel_rx) = tokio::sync::oneshot::channel();
-
-        tokio::spawn(async move {
-            tokio::select! {
-                _ = cancel_rx => {
-                    info!("后台同步已取消");
-                }
-                _ = run_sync_loop(db, device_id, endpoint, topic, doc) => {
-                    warn!("后台同步循环已退出");
-                }
-            }
-        });
-
-        BackgroundSyncHandle {
-            cancel: Some(cancel_tx),
-        }
+    /// 返回事件接收器（邻居上线等）。
+    pub fn events(&self) -> broadcast::Receiver<SyncEvent> {
+        self.event_tx.subscribe()
     }
+}
 
-    /// 停止同步，回到已连接状态。
-    pub async fn stop(self) -> SyncEngineResult<SyncEngine<Connected>> {
-        info!("同步已停止");
+// ── 内部 init ───────────────────────────────────────────────────────
 
-        Ok(SyncEngine {
-            state: Connected {
-                endpoint: self.state.inner.endpoint,
-                gossip: self.state.inner.gossip,
-                signing_key: self.state.inner.signing_key,
-            },
-            db: self.db,
-            device_id: self.device_id,
-            config: self.config,
-        })
-    }
+async fn do_init(
+    db: Arc<std::sync::Mutex<ChatDb>>,
+    config: SyncConfig,
+    device_id: DeviceId,
+    secret_key: Option<[u8; 32]>,
+    ticket: Option<SyncTicket>,
+) -> SyncEngineResult<SyncEngine> {
+    // 1. 初始化网络
+    let secret_key = match secret_key {
+        Some(bytes) => SecretKey::from_bytes(&bytes),
+        None => SecretKey::generate(),
+    };
+    let signing_key = SigningKey::from_bytes(&secret_key.to_bytes());
+
+    let mdns = mdns::MdnsAddressLookup::builder();
+    let endpoint = Endpoint::builder(presets::N0)
+        .secret_key(secret_key)
+        .alpns(vec![SYNC_ALPN.to_vec()])
+        .address_lookup(mdns)
+        .bind()
+        .await
+        .map_err(sync_net_err)?;
+
+    let gossip = Gossip::builder().spawn(endpoint.clone());
+    let _router = iroh::protocol::Router::builder(endpoint.clone())
+        .accept(iroh_gossip::ALPN, gossip.clone())
+        .spawn();
+
+    info!(node_id = %endpoint.id(), "同步引擎网络已初始化");
+
+    let net = NetRes {
+        endpoint: endpoint.clone(),
+        gossip: gossip.clone(),
+        signing_key: signing_key.clone(),
+    };
+
+    // 2. 初始化 topic
+    let sync_ticket = if let Some(v) = ticket {
+        v
+    } else {
+        SyncTicket::new()
+    };
+    let topic =
+        init_docs_and_topic(sync_ticket.clone().into(), gossip.clone(), signing_key).await?;
+
+    info!("同步已启动");
+
+    // 4. 构建水位 → 转入同步态（拿到需广播的 Announcement）
+    let watermarks = {
+        let guard = db
+            .lock()
+            .map_err(|_| SyncEngineError::Internal(anyhow::anyhow!("数据库锁已污染")))?;
+        guard.build_watermarks(device_id)?
+    };
+    let (machine, announcement) =
+        SyncMachine::new(device_id, config).into_syncing(sync_ticket, watermarks);
+
+    // 5. 广播
+    let json = serde_json::to_vec(&announcement)?;
+    let sender = topic.gossip_sender().await.map_err(sync_net_err)?;
+    sender.broadcast(json).await.map_err(sync_net_err)?;
+    info!(sessions = announcement.sessions.len(), "初始广播已发送");
+
+    // 6. 事件通道
+    let (event_tx, _) = broadcast::channel::<SyncEvent>(16);
+
+    let topic_for_bg = topic.clone();
+
+    // 7. 启动后台监听
+    let bg = spawn_background(
+        db.clone(),
+        device_id,
+        endpoint,
+        topic_for_bg,
+        event_tx.clone(),
+    );
+
+    Ok(SyncEngine {
+        machine,
+        net,
+        doc: DocRes { topic },
+        db,
+        event_tx,
+        _bg: bg,
+    })
+}
+
+// ── 广播辅助 ────────────────────────────────────────────────────────
+
+async fn broadcast_current_state(
+    db: &Arc<std::sync::Mutex<ChatDb>>,
+    device_id: DeviceId,
+    topic: &distributed_topic_tracker::Topic,
+) -> SyncEngineResult<()> {
+    let watermarks = {
+        let guard = db
+            .lock()
+            .map_err(|_| SyncEngineError::Internal(anyhow::anyhow!("数据库锁已污染")))?;
+        guard.build_watermarks(device_id)?
+    };
+
+    let announcement = SyncAnnouncement {
+        device_id,
+        sessions: watermarks,
+    };
+
+    let json = serde_json::to_vec(&announcement)?;
+    let sender = topic.gossip_sender().await.map_err(sync_net_err)?;
+    sender.broadcast(json).await.map_err(sync_net_err)?;
+
+    info!(device_id = %device_id, sessions = announcement.sessions.len(), "同步公告已发布");
+    Ok(())
 }
 
 // ── BackgroundSyncHandle ────────────────────────────────────────────
 
-/// 后台同步循环的取消令牌。
 pub struct BackgroundSyncHandle {
     cancel: Option<tokio::sync::oneshot::Sender<()>>,
 }
@@ -483,21 +270,36 @@ impl Drop for BackgroundSyncHandle {
     }
 }
 
-// ── Internal helpers ────────────────────────────────────────────────
+fn spawn_background(
+    db: Arc<std::sync::Mutex<ChatDb>>,
+    device_id: DeviceId,
+    endpoint: Endpoint,
+    topic: distributed_topic_tracker::Topic,
+    event_tx: broadcast::Sender<SyncEvent>,
+) -> BackgroundSyncHandle {
+    let (cancel_tx, cancel_rx) = tokio::sync::oneshot::channel();
+
+    tokio::spawn(async move {
+        tokio::select! {
+            _ = cancel_rx => info!("后台同步已取消"),
+            _ = run_sync_loop(db, device_id, endpoint, topic, event_tx) => {
+                warn!("后台同步循环已退出");
+            }
+        }
+    });
+
+    BackgroundSyncHandle {
+        cancel: Some(cancel_tx),
+    }
+}
+
+// ── 内部辅助 ────────────────────────────────────────────────────────
 
 async fn init_docs_and_topic(
-    endpoint: Endpoint,
+    topic_id: TopicId,
     gossip: Gossip,
     signing_key: SigningKey,
-) -> SyncEngineResult<(Docs, distributed_topic_tracker::Topic)> {
-    let blobs = iroh_blobs::store::mem::MemStore::default();
-
-    let docs = Docs::memory()
-        .spawn(endpoint.clone(), blobs.into(), gossip.clone())
-        .await
-        .map_err(sync_net_err)?;
-
-    let topic_id = TopicId::new(SYNC_TOPIC_NAME.to_string());
+) -> SyncEngineResult<distributed_topic_tracker::Topic> {
     let initial_secret = b"chatpm-sync-initial".to_vec();
     let config = distributed_topic_tracker::Config::builder()
         .dht_config(
@@ -530,25 +332,20 @@ async fn init_docs_and_topic(
         .map_err(sync_net_err)?;
 
     info!("gossip topic 已加入");
-
-    Ok((docs, topic))
+    Ok(topic)
 }
 
-/// 后台同步循环：监听 gossip 事件，接收远程公告并拉取数据。
-///
-/// `topic` 和 `doc` 由调用方保证存在（类型系统已消除 Option）。
 async fn run_sync_loop(
     db: Arc<std::sync::Mutex<ChatDb>>,
     device_id: DeviceId,
     endpoint: Endpoint,
     topic: distributed_topic_tracker::Topic,
-    _doc: Doc,
+    event_tx: broadcast::Sender<SyncEvent>,
 ) {
     let Ok(mut receiver) = topic.gossip_receiver().await else {
         error!("无法获取 gossip receiver");
         return;
     };
-
     info!("后台同步循环已启动");
 
     loop {
@@ -559,13 +356,7 @@ async fn run_sync_loop(
                         if remote_announcement.device_id == device_id {
                             continue;
                         }
-
-                        info!(
-                            from_device = %remote_announcement.device_id,
-                            sessions = remote_announcement.sessions.len(),
-                            "收到远程同步公告"
-                        );
-
+                        info!(from_device = %remote_announcement.device_id, sessions = remote_announcement.sessions.len(), "收到远程同步公告");
                         let local_watermarks = {
                             let db_guard = match db.lock() {
                                 Ok(g) => g,
@@ -582,22 +373,16 @@ async fn run_sync_loop(
                                 }
                             }
                         };
-
                         let request = compute_sync_request(&local_watermarks, &remote_announcement);
-
                         if request.need_sessions.is_empty() && request.need_turns.is_empty() {
                             continue;
                         }
-
                         info!(
                             need_sessions = request.need_sessions.len(),
                             need_turns = request.need_turns.len(),
                             "需要同步数据"
                         );
-
-                        let peer_id = msg.delivered_from;
-
-                        match request_sync(&endpoint, peer_id, &request).await {
+                        match request_sync(&endpoint, msg.delivered_from, &request).await {
                             Ok(payload) => match parse_sync_payload(payload) {
                                 Ok(verified) => {
                                     let db_guard = match db.lock() {
@@ -609,39 +394,25 @@ async fn run_sync_loop(
                                     };
                                     match db_guard.apply_verified_payload(&verified) {
                                         Ok(count) => {
-                                            info!(
-                                                turns_written = count,
-                                                "同步数据已写入本地数据库"
-                                            );
+                                            info!(turns_written = count, "同步数据已写入本地数据库")
                                         }
-                                        Err(e) => {
-                                            error!(%e, "写入同步数据失败");
-                                        }
+                                        Err(e) => error!(%e, "写入同步数据失败"),
                                     }
                                 }
-                                Err(e) => {
-                                    error!(%e, "验证同步负载失败");
-                                }
+                                Err(e) => error!(%e, "验证同步负载失败"),
                             },
-                            Err(e) => {
-                                error!(%e, "同步请求失败");
-                            }
+                            Err(e) => error!(%e, "同步请求失败"),
                         }
                     }
-                    Err(e) => {
-                        warn!(%e, "解析远程公告失败");
-                    }
+                    Err(e) => warn!(%e, "解析远程公告失败"),
                 }
             }
             Ok(GossipEvent::NeighborUp(peer)) => {
-                info!(%peer, "邻居上线");
+                info!(%peer, "邻居上线——通知上层广播");
+                let _ = event_tx.send(SyncEvent::NeighborUp);
             }
-            Ok(GossipEvent::NeighborDown(peer)) => {
-                info!(%peer, "邻居下线");
-            }
-            Ok(GossipEvent::Lagged) => {
-                warn!("gossip 消息滞后");
-            }
+            Ok(GossipEvent::NeighborDown(peer)) => info!(%peer, "邻居下线"),
+            Ok(GossipEvent::Lagged) => warn!("gossip 消息滞后"),
             Err(e) => {
                 error!(%e, "gossip receiver 错误");
                 break;
@@ -650,7 +421,7 @@ async fn run_sync_loop(
     }
 }
 
-// ── Transport layer ─────────────────────────────────────────────────
+// ── 传输层 ──────────────────────────────────────────────────────────
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct SyncMessage {
@@ -658,7 +429,6 @@ struct SyncMessage {
     payload: Option<SyncPayload>,
 }
 
-/// 向对端发送同步请求并等待响应。
 async fn request_sync(
     endpoint: &Endpoint,
     peer: EndpointId,
@@ -679,132 +449,27 @@ async fn request_sync(
     send_data.extend_from_slice(&json);
 
     let (mut send, mut recv) = conn.open_bi().await.map_err(sync_net_err)?;
-
     send.write_all(&send_data).await.map_err(sync_net_err)?;
     send.finish()
         .map_err(|e| SyncEngineError::Network(e.into()))?;
 
     let buf = recv.read_to_end(1024 * 1024).await.map_err(sync_net_err)?;
-
     if buf.len() < 8 || &buf[..4] != SYNC_PROTO_MAGIC {
         return Err(SyncEngineError::Internal(anyhow::anyhow!(
             "无效的同步响应格式"
         )));
     }
-
     let json_len = u32::from_be_bytes([buf[4], buf[5], buf[6], buf[7]]) as usize;
     if buf.len() < 8 + json_len {
         return Err(SyncEngineError::Internal(anyhow::anyhow!(
             "同步响应数据不完整"
         )));
     }
-
     let response: SyncMessage = serde_json::from_slice(&buf[8..8 + json_len])?;
-
     response
         .payload
         .ok_or_else(|| SyncEngineError::Internal(anyhow::anyhow!("响应中无负载数据")))
 }
-
-/// 处理接收到的同步请求。
-async fn handle_sync_request(
-    db: &Arc<std::sync::Mutex<ChatDb>>,
-    _device_id: DeviceId,
-    request: &SyncRequest,
-) -> SyncEngineResult<SyncPayload> {
-    let db = db
-        .lock()
-        .map_err(|_| SyncEngineError::Internal(anyhow::anyhow!("数据库锁已污染")))?;
-
-    let mut sessions = Vec::new();
-    let mut turns = Vec::new();
-
-    for sid in &request.need_sessions {
-        if let Some(snapshot) = db.get_session_snapshot(*sid)? {
-            sessions.push(snapshot);
-            let all_turns = db.get_turns_from(*sid, 0)?;
-            turns.extend(all_turns);
-        }
-    }
-
-    for (sid, start_turn) in &request.need_turns {
-        let partial_turns = db.get_turns_from(*sid, *start_turn)?;
-        turns.extend(partial_turns);
-    }
-
-    Ok(SyncPayload { sessions, turns })
-}
-
-/// 启动同步请求处理服务（在端点上监听入站连接）。
-#[allow(dead_code)]
-async fn start_sync_server(
-    endpoint: &Endpoint,
-    db: Arc<std::sync::Mutex<ChatDb>>,
-    device_id: DeviceId,
-) -> SyncEngineResult<()> {
-    loop {
-        let Some(incoming) = endpoint.accept().await else {
-            continue;
-        };
-
-        // iroh 的 accept 返回 Connecting，直接 await 得到 Connection
-        let Ok(conn) = incoming.await else {
-            continue;
-        };
-
-        let db = Arc::clone(&db);
-        tokio::spawn(async move {
-            while let Ok((mut send, mut recv)) = conn.accept_bi().await {
-                let buf = match recv.read_to_end(1024 * 1024).await {
-                    Ok(b) => b,
-                    Err(_) => continue,
-                };
-
-                if buf.len() < 8 || &buf[..4] != SYNC_PROTO_MAGIC {
-                    continue;
-                }
-
-                let json_len = u32::from_be_bytes([buf[4], buf[5], buf[6], buf[7]]) as usize;
-                if buf.len() < 8 + json_len {
-                    continue;
-                }
-
-                let msg: SyncMessage = match serde_json::from_slice(&buf[8..8 + json_len]) {
-                    Ok(m) => m,
-                    Err(_) => continue,
-                };
-
-                let Some(ref request) = msg.request else {
-                    continue;
-                };
-
-                let response = match handle_sync_request(&db, device_id, request).await {
-                    Ok(payload) => SyncMessage {
-                        request: None,
-                        payload: Some(payload),
-                    },
-                    Err(e) => {
-                        error!(%e, "处理同步请求失败");
-                        continue;
-                    }
-                };
-
-                let mut resp_data = SYNC_PROTO_MAGIC.to_vec();
-                let json = match serde_json::to_vec(&response) {
-                    Ok(j) => j,
-                    Err(_) => continue,
-                };
-                resp_data.extend_from_slice(&(json.len() as u32).to_be_bytes());
-                resp_data.extend_from_slice(&json);
-
-                let _ = send.write_all(&resp_data).await;
-                let _ = send.finish();
-            }
-        });
-    }
-}
-
-// ── Error helpers ───────────────────────────────────────────────────
 
 fn sync_net_err(e: impl Into<anyhow::Error>) -> SyncEngineError {
     SyncEngineError::Network(e.into())
