@@ -3,14 +3,18 @@
 //! 纯函数实现跨设备同步所需的数据类型和协调算法，不涉及任何 I/O 或网络细节。
 //! 调用方（gossip 层或命令层）提供数据，本模块计算差异并验证数据一致性。
 //!
-//! # 同步流程
+//! # 同步协议
 //!
-//! 1. **通告（Announcement）**: 本设备变更后，广播 [`SyncAnnouncement`] 描述所知会话水位
-//! 2. **比对（Reconcile）**: 接收方调用 [`compute_sync_request`] 计算缺失数据
-//! 3. **请求（Request）**: 接收方向发送方发起 [`SyncRequest`]
-//! 4. **响应（Payload）**: 发送方组装 [`SyncPayload`] 返回实际数据
-//! 5. **解析（Parse）**: 接收方调用 [`parse_sync_payload`] 消费原始负载，
-//!    返回 [`VerifiedPayload`]——携带结构一致性证明的类型
+//! 三层消息体系：
+//!
+//! 1. **TurnBroadcast** — 实时增量广播：新轮次产生时立即广播消息体，
+//!    接收方直接写入 DB，无需 P2P 补传。
+//! 2. **StateBroadcast** — 水位广播：携带设备所知会话水位。
+//!    - `Full`：新上线 / 邻居上线时广播全量水位。
+//!    - `Incremental`：定期心跳时广播变更会话的水位。
+//!      接收方比对差异后按需发起 P2P 补传。
+//! 3. **P2P 补传** — 按需同步：收到水位广播后调用 [`compute_sync_request`]
+//!    比对，缺失数据通过直连 [`SyncRequest`] → [`SyncPayload`] 拉取。
 
 use std::collections::{HashMap, HashSet};
 
@@ -102,6 +106,114 @@ pub struct TurnSnapshot {
     pub device_id: DeviceId,
 }
 
+// ── Gossip 消息信封 ────────────────────────────────────────────────
+
+/// Gossip 通道上传输的同步消息。
+///
+/// 替代原先仅发送 [`SyncAnnouncement`] 的设计，
+/// 支持多种消息类型以降低延迟和带宽。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum GossipMessage {
+    /// 实时增量：新产生的轮次内容，接收方直接写入 DB。
+    TurnBroadcast(TurnBroadcast),
+    /// 会话水位广播：全量或增量。
+    StateBroadcast(StateBroadcast),
+}
+
+/// 实时增量轮次广播。
+///
+/// 当本地用户发送消息获得回复后，立即通过 gossip 广播，
+/// 其他节点直接写入本地 DB，无需 P2P 补传。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TurnBroadcast {
+    pub device_id: DeviceId,
+    pub session_id: SessionId,
+    pub turn_num: u64,
+    pub user_text: String,
+    pub assistant_text: String,
+    pub created_at: DateTime<Utc>,
+}
+
+impl TurnBroadcast {
+    /// 转为 [`TurnSnapshot`] 用于持久化。
+    /// 接收方生成新的 `turn_id`，`device_id` 记录原始广播者。
+    pub fn into_turn_snapshot(self) -> TurnSnapshot {
+        TurnSnapshot {
+            turn_id: TurnId::generate(),
+            session_id: self.session_id,
+            turn_num: self.turn_num,
+            user_text: self.user_text,
+            assistant_text: self.assistant_text,
+            created_at: self.created_at,
+            device_id: self.device_id,
+        }
+    }
+}
+
+/// 水位广播消息类型。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum StateKind {
+    /// 全量：本节点所知的所有会话水位。
+    /// 触发条件：首次加入网络、检测到邻居上线。
+    Full,
+    /// 增量：近期发生变更的会话水位。
+    /// 触发条件：定期超时。
+    Incremental,
+}
+
+/// 会话水位广播消息。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StateBroadcast {
+    pub device_id: DeviceId,
+    pub kind: StateKind,
+    pub sessions: Vec<SessionWatermark>,
+}
+
+// ── 事件 —— 状态机 I/O 边界 ──────────────────────────────────────────
+
+/// 输入事件——驱动状态机的外部刺激。
+#[derive(Debug, Clone)]
+pub enum InEvent {
+    /// 本地新产生的轮次（`send_message` 完成后触发）。
+    NewLocalTurn(TurnSnapshot),
+    /// 远程轮次（来自 gossip `TurnBroadcast` 或 P2P 补传返回）。
+    RemoteTurn {
+        from_device: DeviceId,
+        turn: TurnSnapshot,
+    },
+    /// 远程水位广播（来自 gossip `StateBroadcast`）。
+    RemoteState {
+        from_device: DeviceId,
+        sessions: Vec<SessionWatermark>,
+    },
+    /// 远程新会话信息（来自 P2P 补传返回的 `SessionSnapshot`）。
+    RemoteSession(SessionSnapshot),
+    /// 邻居上线。
+    NeighborUp,
+    /// 离开同步网络。
+    Leave,
+    /// 超时触发（由引擎根据 `poll_timeout` 返回的间隔注入）。
+    Timeout,
+}
+
+/// 输出事件——状态机产出的外部动作。
+#[derive(Debug, Clone)]
+pub enum OutEvent {
+    /// 通过 gossip 广播的消息。
+    BroadcastGossip(GossipMessage),
+    /// 轮次写入本地 DB。
+    WriteTurn(TurnSnapshot),
+    /// 创建新会话记录。
+    WriteSession(SessionSnapshot),
+    /// 发起 P2P 补传请求。
+    RequestBackfill {
+        to_device: DeviceId,
+        request: SyncRequest,
+    },
+}
+
 // ── Reconciliation ────────────────────────────────────────────────
 
 /// 根据本地会话水表和远程通告，计算需要向对方请求哪些数据。
@@ -139,6 +251,37 @@ pub fn compute_sync_request(local: &[SessionWatermark], remote: &SyncAnnouncemen
             }
             Some(local_ws) => {
                 // 双方都有此会话 → 按轮次数补齐
+                if remote_ws.turn_count > local_ws.turn_count {
+                    let start_turn = local_ws.turn_count + 1;
+                    need_turns.push((remote_ws.session_id, start_turn));
+                }
+            }
+        }
+    }
+
+    SyncRequest {
+        need_sessions,
+        need_turns,
+    }
+}
+
+/// 根据本地和远程会话水位，计算需要向对方请求哪些数据。
+///
+/// 与 [`compute_sync_request`] 逻辑相同，但直接接收两个水位列表，
+/// 用于状态机内部 `RemoteState` 事件处理时无需构造 `SyncAnnouncement`。
+pub fn compute_request(local: &[SessionWatermark], remote: &[SessionWatermark]) -> SyncRequest {
+    let local_map: HashMap<SessionId, &SessionWatermark> =
+        local.iter().map(|w| (w.session_id, w)).collect();
+
+    let mut need_sessions = Vec::new();
+    let mut need_turns = Vec::new();
+
+    for remote_ws in remote {
+        match local_map.get(&remote_ws.session_id) {
+            None => {
+                need_sessions.push(remote_ws.session_id);
+            }
+            Some(local_ws) => {
                 if remote_ws.turn_count > local_ws.turn_count {
                     let start_turn = local_ws.turn_count + 1;
                     need_turns.push((remote_ws.session_id, start_turn));

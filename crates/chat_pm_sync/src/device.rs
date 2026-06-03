@@ -36,6 +36,25 @@ impl DeviceId {
         Self(bytes)
     }
 
+    /// 从 ed25519 私钥派生设备标识（= 公钥的 32 字节）。
+    pub fn from_secret_key(secret_key_bytes: &[u8; 32]) -> Self {
+        let signing = ed25519_dalek::SigningKey::from_bytes(secret_key_bytes);
+        let verifying = signing.verifying_key();
+        Self(verifying.to_bytes())
+    }
+
+    /// 生成新的随机设备身份。
+    ///
+    /// 返回 `(DeviceId, 私钥_bytes)`。私钥应持久化存储以供后续恢复。
+    pub fn generate_identity() -> (Self, [u8; 32]) {
+        let mut bytes = [0u8; 32];
+        bytes[..16].copy_from_slice(&uuid::Uuid::new_v4().into_bytes());
+        bytes[16..].copy_from_slice(&uuid::Uuid::new_v4().into_bytes());
+        let signing = ed25519_dalek::SigningKey::from_bytes(&bytes);
+        let key_bytes = signing.to_bytes();
+        (Self::from_secret_key(&key_bytes), key_bytes)
+    }
+
     /// 返回 hex 编码的 64 字符字符串。
     pub fn to_hex(&self) -> String {
         self.0.iter().map(|b| format!("{b:02x}")).collect()

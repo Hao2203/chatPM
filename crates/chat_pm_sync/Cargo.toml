@@ -8,6 +8,7 @@ base64ct = { workspace = true }
 chat_pm_session = { workspace = true }
 chrono = { workspace = true }
 distributed-topic-tracker = { workspace = true }
+ed25519-dalek = { workspace = true }
 serde = { workspace = true }
 thiserror = { workspace = true }
 uuid = { workspace = true }

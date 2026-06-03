@@ -1,28 +1,37 @@
 //! 同步引擎——基于 iroh 的 P2P 设备间会话同步。
 //!
-//! `SyncEngine` 是非泛型 I/O 容器。纯类型状态机由
-//! `chat_pm_sync::sync_machine::SyncMachine<S>` 提供，`SyncEngine` 在
-//! init 过程中驱动状态转换，完成后始终处于 Syncing 态。
+//! `SyncEngine` 是 I/O 容器，持有网络资源和输入通道。
+//! 纯协议状态机 [`chat_pm_sync::SyncMachine`] 在后台事件循环中运行，
+//! 所有事件通过 `handle_new_turn` 等方法注入。
 //!
-//! init 完成后立即广播自身状态；邻居上线时通过 [`events()`] 通道通知上层。
+//! # 事件循环
+//!
+//! 后台循环统一处理三类输入：
+//!
+//! 1. **gossip 消息** — 解析为 [`InEvent::RemoteTurn`] 或 [`InEvent::RemoteState`]，喂入状态机。
+//! 2. **外部输入** — 通过 `mpsc` 通道注入（`NewLocalTurn` 等），由 Tauri 层调用。
+//! 3. **定期超时** — 由 [`SyncMachine::poll_timeout`] 驱动，触发增量水位广播。
+//!
+//! 状态机产出的 [`OutEvent`] 由 `dispatch` 函数分流执行。
 
-use std::{sync::Arc, time::Duration};
+use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use anyhow;
-use chat_pm_database::{ChatDb, DbError};
+use chat_pm_database::{ChatDb, DbError, SessionRecord};
 use chat_pm_sync::{
-    DeviceId, SyncAnnouncement, SyncError, SyncPayload, SyncRequest, compute_sync_request,
+    DeviceId, GossipMessage, InEvent, OutEvent, SyncError, SyncPayload, SyncRequest, TurnSnapshot,
     parse_sync_payload,
     sync_machine::{SyncMachine, SyncSyncing},
 };
 use distributed_topic_tracker::{
-    AutoDiscoveryGossip, BootstrapConfig, DhtConfig, RecordPublisher, TopicId,
+    AutoDiscoveryGossip, BootstrapConfig, DhtConfig, GossipReceiver, RecordPublisher, TopicId,
 };
 use ed25519_dalek::SigningKey;
 use iroh::{Endpoint, EndpointId, SecretKey, address_lookup::mdns, endpoint::presets};
 use iroh_gossip::{api::Event as GossipEvent, net::Gossip};
 use serde::{Deserialize, Serialize};
-use tokio::sync::broadcast;
+use tokio::sync::mpsc;
 use tracing::{error, info, warn};
 
 // ── 重导出 ──────────────────────────────────────────────────────────
@@ -67,6 +76,22 @@ pub type SyncEngineResult<T> = Result<T, SyncEngineError>;
 const SYNC_ALPN: &[u8] = b"/chatpm/sync-req/1";
 const SYNC_PROTO_MAGIC: &[u8; 4] = b"cSPM";
 
+// ── DeviceId ↔ EndpointId 不可失败转换 ──────────────────────────────
+
+/// `DeviceId` → `EndpointId` 转换。
+///
+/// `DeviceId` 派生自 ed25519 公钥，故转换不会失败。
+fn device_to_endpoint(device_id: DeviceId) -> EndpointId {
+    EndpointId::from_bytes(&device_id.into_inner())
+        .expect("DeviceId must be a valid ed25519 public key")
+}
+
+/// `EndpointId` → `DeviceId` 转换。
+#[allow(dead_code)]
+fn endpoint_to_device(endpoint_id: &EndpointId) -> DeviceId {
+    DeviceId::from_bytes(*endpoint_id.as_bytes())
+}
+
 // ── 内部 I/O 资源 ───────────────────────────────────────────────────
 
 #[allow(dead_code)]
@@ -81,69 +106,67 @@ struct DocRes {
     topic: distributed_topic_tracker::Topic,
 }
 
-// ── 事件 ────────────────────────────────────────────────────────────
-
-/// 同步引擎事件。
-#[derive(Debug, Clone)]
-pub enum SyncEvent {
-    /// 邻居上线，建议调用 `publish_announcement` 广播自身状态
-    NeighborUp,
-}
-
 // ── SyncEngine ──────────────────────────────────────────────────────
 
-/// 同步引擎——非泛型，init 后始终处于 Syncing 状态。
+/// 同步引擎——非泛型 I/O 容器。
+///
+/// 协议逻辑由内部 `SyncMachine<SyncSyncing>` 驱动，
+/// 引擎提供网络 I/O 和对外 API。
+#[allow(dead_code)]
 pub struct SyncEngine {
-    machine: SyncMachine<SyncSyncing>,
     net: NetRes,
     doc: DocRes,
     db: Arc<std::sync::Mutex<ChatDb>>,
-    event_tx: broadcast::Sender<SyncEvent>,
+    /// 向后台事件循环注入事件的通道。
+    input_tx: mpsc::UnboundedSender<(Instant, InEvent)>,
+    ticket: SyncTicket,
+    device_id: DeviceId,
+    secret_key: [u8; 32],
     _bg: BackgroundSyncHandle,
 }
 
 impl SyncEngine {
-    /// 创建新同步链——创建文档后立即广播自身状态。
+    /// 创建新同步链。
     pub async fn create(
         db: Arc<std::sync::Mutex<ChatDb>>,
         config: SyncConfig,
-        device_id: DeviceId,
         secret_key: Option<[u8; 32]>,
     ) -> SyncEngineResult<Self> {
-        do_init(db, config, device_id, secret_key, None).await
+        do_init(db, config, secret_key, None).await
     }
 
-    /// 凭 ticket 加入已有同步链——加入后立即广播自身状态。
+    /// 凭 ticket 加入已有同步链。
     pub async fn join(
         db: Arc<std::sync::Mutex<ChatDb>>,
         config: SyncConfig,
-        device_id: DeviceId,
         secret_key: Option<[u8; 32]>,
         ticket: SyncTicket,
     ) -> SyncEngineResult<Self> {
-        do_init(db, config, device_id, secret_key, Some(ticket)).await
+        do_init(db, config, secret_key, Some(ticket)).await
+    }
+
+    /// 通知引擎本地产生了新轮次（`send_message` 完成后调用）。
+    ///
+    /// 通过内部通道异步注入状态机，非阻塞。
+    pub fn handle_new_turn(&self, now: Instant, turn: TurnSnapshot) {
+        let _ = self.input_tx.send((now, InEvent::NewLocalTurn(turn)));
+    }
+
+    /// 手动触发全量状态广播（等效于 NeighborUp 事件）。
+    pub fn handle_neighbor_up(&self, now: Instant) {
+        let _ = self.input_tx.send((now, InEvent::NeighborUp));
     }
 
     pub fn ticket(&self) -> &SyncTicket {
-        self.machine.ticket()
+        &self.ticket
     }
 
     pub fn device_id(&self) -> DeviceId {
-        self.machine.device_id
+        self.device_id
     }
 
     pub fn secret_key_bytes(&self) -> [u8; 32] {
-        self.net.signing_key.to_bytes()
-    }
-
-    /// 广播自身状态（创建/恢复时由 init 自动调用，邻居上线后上层主动调用）。
-    pub async fn publish_announcement(&self) -> SyncEngineResult<()> {
-        broadcast_current_state(&self.db, self.machine.device_id, &self.doc.topic).await
-    }
-
-    /// 返回事件接收器（邻居上线等）。
-    pub fn events(&self) -> broadcast::Receiver<SyncEvent> {
-        self.event_tx.subscribe()
+        self.secret_key
     }
 }
 
@@ -152,7 +175,6 @@ impl SyncEngine {
 async fn do_init(
     db: Arc<std::sync::Mutex<ChatDb>>,
     config: SyncConfig,
-    device_id: DeviceId,
     secret_key: Option<[u8; 32]>,
     ticket: Option<SyncTicket>,
 ) -> SyncEngineResult<SyncEngine> {
@@ -161,7 +183,11 @@ async fn do_init(
         Some(bytes) => SecretKey::from_bytes(&bytes),
         None => SecretKey::generate(),
     };
-    let signing_key = SigningKey::from_bytes(&secret_key.to_bytes());
+    let secret_key_bytes = secret_key.to_bytes();
+
+    // 2. 从私钥派生设备标识
+    let device_id = DeviceId::from_secret_key(&secret_key_bytes);
+    let signing_key = SigningKey::from_bytes(&secret_key_bytes);
 
     let mdns = mdns::MdnsAddressLookup::builder();
     let endpoint = Endpoint::builder(presets::N0)
@@ -187,76 +213,44 @@ async fn do_init(
     };
 
     // 2. 初始化 topic
-    let sync_ticket = if let Some(v) = ticket {
-        v
-    } else {
-        SyncTicket::new()
-    };
+    let sync_ticket = ticket.unwrap_or_default();
     let topic = init_topic(sync_ticket.clone().into(), gossip.clone(), signing_key).await?;
 
     info!("同步已启动");
 
-    // 3. 构建水位 → 转入同步态（拿到需广播的 Announcement）
+    // 3. 构建水位 → 转入同步态
     let watermarks = {
         let guard = lock_db(&db)?;
         guard.build_watermarks(device_id)?
     };
-    let (machine, announcement) =
-        SyncMachine::new(device_id, config).into_syncing(sync_ticket, watermarks);
+    let machine = SyncMachine::new(device_id, config).into_syncing(sync_ticket.clone(), watermarks);
 
-    // 4. 广播
-    let json = serde_json::to_vec(&announcement)?;
-    let sender = topic.gossip_sender().await.map_err(sync_net_err)?;
-    sender.broadcast(json).await.map_err(sync_net_err)?;
-    info!(sessions = announcement.sessions.len(), "初始广播已发送");
+    // 4. 创建输入通道
+    let (input_tx, input_rx) = mpsc::unbounded_channel::<(Instant, InEvent)>();
 
-    // 5. 事件通道
-    let (event_tx, _) = broadcast::channel::<SyncEvent>(16);
+    // 5. 获取 gossip receiver
+    let gossip_rx = topic.gossip_receiver().await.map_err(sync_net_err)?;
 
-    let topic_for_bg = topic.clone();
-
-    // 6. 启动后台监听
-    let bg = spawn_background(
+    // 6. 启动后台事件循环
+    let bg = spawn_event_loop(
+        machine,
         db.clone(),
-        device_id,
         endpoint,
-        topic_for_bg,
-        event_tx.clone(),
+        topic.clone(),
+        gossip_rx,
+        input_rx,
     );
 
     Ok(SyncEngine {
-        machine,
         net,
         doc: DocRes { topic },
         db,
-        event_tx,
+        input_tx,
+        ticket: sync_ticket,
+        device_id,
+        secret_key: secret_key_bytes,
         _bg: bg,
     })
-}
-
-// ── 广播辅助 ────────────────────────────────────────────────────────
-
-async fn broadcast_current_state(
-    db: &Arc<std::sync::Mutex<ChatDb>>,
-    device_id: DeviceId,
-    topic: &distributed_topic_tracker::Topic,
-) -> SyncEngineResult<()> {
-    let watermarks = {
-        let guard = lock_db(db)?;
-        guard.build_watermarks(device_id)?
-    };
-
-    let announcement = SyncAnnouncement {
-        device_id,
-        sessions: watermarks,
-    };
-
-    let json = serde_json::to_vec(&announcement)?;
-    let sender = topic.gossip_sender().await.map_err(sync_net_err)?;
-    sender.broadcast(json).await.map_err(sync_net_err)?;
-
-    info!(device_id = %device_id, sessions = announcement.sessions.len(), "同步公告已发布");
-    Ok(())
 }
 
 // ── BackgroundSyncHandle ────────────────────────────────────────────
@@ -281,20 +275,90 @@ impl Drop for BackgroundSyncHandle {
     }
 }
 
-fn spawn_background(
+fn spawn_event_loop(
+    mut machine: SyncMachine<SyncSyncing>,
     db: Arc<std::sync::Mutex<ChatDb>>,
-    device_id: DeviceId,
     endpoint: Endpoint,
     topic: distributed_topic_tracker::Topic,
-    event_tx: broadcast::Sender<SyncEvent>,
+    mut gossip_rx: GossipReceiver,
+    mut input_rx: mpsc::UnboundedReceiver<(Instant, InEvent)>,
 ) -> BackgroundSyncHandle {
-    let (cancel_tx, cancel_rx) = tokio::sync::oneshot::channel();
+    let (cancel_tx, mut cancel_rx) = tokio::sync::oneshot::channel();
+
+    // 用于 P2P 回传的输入通道
+    let (backfill_tx, mut backfill_rx) = mpsc::unbounded_channel::<(Instant, InEvent)>();
 
     tokio::spawn(async move {
-        tokio::select! {
-            _ = cancel_rx => info!("后台同步已取消"),
-            _ = run_sync_loop(db, device_id, endpoint, topic, event_tx) => {
-                warn!("后台同步循环已退出");
+        // ── 初始 NeighborUp 广播 ──────────────────────────────────
+        let now = Instant::now();
+        for out in machine.handle(now, InEvent::NeighborUp) {
+            if let Err(e) =
+                dispatch_out(&topic, &db, &endpoint, &backfill_tx, out).await
+            {
+                error!(%e, "初始广播失败");
+            }
+        }
+
+        info!("同步事件循环已启动");
+
+        loop {
+            let timeout = machine.poll_timeout().and_then(|t| {
+                let now = Instant::now();
+                t.checked_duration_since(now)
+            });
+
+            tokio::select! {
+                biased;
+
+                // ── 取消信号 ────────────────────────────────────
+                _ = &mut cancel_rx => {
+                    info!("同步事件循环收到取消信号");
+                    break;
+                }
+
+                // ── P2P 回传 ────────────────────────────────────
+                Some((now, event)) = backfill_rx.recv() => {
+                    for out in machine.handle(now, event) {
+                        if let Err(e) = dispatch_out(&topic, &db, &endpoint, &backfill_tx, out).await {
+                            error!(%e, "处理回传事件失败");
+                        }
+                    }
+                }
+
+                // ── 外部输入（handle_new_turn 等） ──────────────
+                Some((now, event)) = input_rx.recv() => {
+                    for out in machine.handle(now, event) {
+                        if let Err(e) = dispatch_out(&topic, &db, &endpoint, &backfill_tx, out).await {
+                            error!(%e, "处理输入事件失败");
+                        }
+                    }
+                }
+
+                // ── Gossip 消息 ──────────────────────────────────
+                Ok(msg) = gossip_rx.next() => {
+                    if let Err(e) = handle_gossip_event(
+                        msg, &mut machine,
+                        &topic, &db, &endpoint, &backfill_tx,
+                    ).await {
+                        error!(%e, "处理 gossip 事件失败");
+                    }
+                }
+
+                // ── 定期超时 ─────────────────────────────────────
+                _ = async {
+                    if let Some(dur) = timeout {
+                        tokio::time::sleep(dur).await;
+                    } else {
+                        std::future::pending::<()>().await;
+                    }
+                } => {
+                    let now = Instant::now();
+                    for out in machine.handle(now, InEvent::Timeout) {
+                        if let Err(e) = dispatch_out(&topic, &db, &endpoint, &backfill_tx, out).await {
+                            error!(%e, "处理超时事件失败");
+                        }
+                    }
+                }
             }
         }
     });
@@ -302,6 +366,183 @@ fn spawn_background(
     BackgroundSyncHandle {
         cancel: Some(cancel_tx),
     }
+}
+
+// ── Gossip 事件处理 ─────────────────────────────────────────────────
+
+async fn handle_gossip_event(
+    event: GossipEvent,
+    machine: &mut SyncMachine<SyncSyncing>,
+    topic: &distributed_topic_tracker::Topic,
+    db: &Arc<std::sync::Mutex<ChatDb>>,
+    endpoint: &Endpoint,
+    backfill_tx: &mpsc::UnboundedSender<(Instant, InEvent)>,
+) -> SyncEngineResult<()> {
+    match event {
+        GossipEvent::Received(msg) => {
+            match serde_json::from_slice::<GossipMessage>(&msg.content) {
+                Ok(GossipMessage::TurnBroadcast(tb)) => {
+                    let from_device = tb.device_id;
+                    let event = InEvent::RemoteTurn {
+                        from_device,
+                        turn: tb.into_turn_snapshot(),
+                    };
+                    let now = Instant::now();
+                    for out in machine.handle(now, event) {
+                        dispatch_out(topic, db, endpoint, backfill_tx, out).await?;
+                    }
+                }
+                Ok(GossipMessage::StateBroadcast(sb)) => {
+                    let from_device = sb.device_id;
+                    let event = InEvent::RemoteState {
+                        from_device,
+                        sessions: sb.sessions,
+                    };
+                    let now = Instant::now();
+                    for out in machine.handle(now, event) {
+                        dispatch_out(topic, db, endpoint, backfill_tx, out).await?;
+                    }
+                }
+                Err(_) => {
+                    // 可能是旧版 SyncAnnouncement 格式，尝试兼容解析
+                    if let Ok(ann) =
+                        serde_json::from_slice::<chat_pm_sync::SyncAnnouncement>(&msg.content)
+                    {
+                        let from_device = ann.device_id;
+                        let event = InEvent::RemoteState {
+                            from_device,
+                            sessions: ann.sessions,
+                        };
+                        let now = Instant::now();
+                        for out in machine.handle(now, event) {
+                            dispatch_out(topic, db, endpoint, backfill_tx, out).await?;
+                        }
+                    } else {
+                        warn!("解析 gossip 消息失败（非 GossipMessage 也非 SyncAnnouncement）");
+                    }
+                }
+            }
+        }
+        GossipEvent::NeighborUp(peer) => {
+            info!(%peer, "邻居上线——广播全量状态");
+            let now = Instant::now();
+            for out in machine.handle(now, InEvent::NeighborUp) {
+                dispatch_out(topic, db, endpoint, backfill_tx, out).await?;
+            }
+        }
+        GossipEvent::NeighborDown(peer) => info!(%peer, "邻居下线"),
+        GossipEvent::Lagged => warn!("gossip 消息滞后"),
+    }
+    Ok(())
+}
+
+// ── OutEvent 分发 ──────────────────────────────────────────────────
+
+/// 执行状态机产出的单个 [`OutEvent`]。
+///
+/// - `BroadcastGossip` → 通过 gossip 广播
+/// - `WriteTurn` → 写入 DB
+/// - `WriteSession` → 写入 DB
+/// - `RequestBackfill` → 发起 P2P 请求，结果通过 `backfill_tx` 回传状态机
+async fn dispatch_out(
+    topic: &distributed_topic_tracker::Topic,
+    db: &Arc<std::sync::Mutex<ChatDb>>,
+    endpoint: &Endpoint,
+    backfill_tx: &mpsc::UnboundedSender<(Instant, InEvent)>,
+    out: OutEvent,
+) -> SyncEngineResult<()> {
+    match out {
+        OutEvent::BroadcastGossip(msg) => {
+            let json = serde_json::to_vec(&msg)?;
+            let sender = topic.gossip_sender().await.map_err(sync_net_err)?;
+            sender.broadcast(json).await.map_err(sync_net_err)?;
+
+            match msg {
+                GossipMessage::TurnBroadcast(tb) => {
+                    info!(
+                        session = %tb.session_id,
+                        turn_num = tb.turn_num,
+                        "轮次广播已发送"
+                    );
+                }
+                GossipMessage::StateBroadcast(sb) => {
+                    info!(
+                        kind = ?sb.kind,
+                        sessions = sb.sessions.len(),
+                        "水位广播已发送"
+                    );
+                }
+            }
+        }
+
+        OutEvent::WriteTurn(turn) => {
+            let guard = lock_db(db)?;
+            guard.upsert_turn(&turn)?;
+            info!(
+                session = %turn.session_id,
+                turn_num = turn.turn_num,
+                "远程轮次已写入本地"
+            );
+        }
+
+        OutEvent::WriteSession(snapshot) => {
+            let guard = lock_db(db)?;
+            let record = SessionRecord {
+                session_id: snapshot.session_id,
+                created_at: snapshot.created_at,
+                title: snapshot.title,
+                user_persona: None,
+            };
+            guard.upsert_session(record)?;
+            info!(
+                session = %snapshot.session_id,
+                "远程会话已创建"
+            );
+        }
+
+        OutEvent::RequestBackfill { to_device, request } => {
+            let peer_id = device_to_endpoint(to_device);
+            let endpoint = endpoint.clone();
+            let tx = backfill_tx.clone();
+
+            info!(
+                to_device = %to_device,
+                need_sessions = request.need_sessions.len(),
+                need_turns = request.need_turns.len(),
+                "发起 P2P 补传请求"
+            );
+
+            tokio::spawn(async move {
+                match request_sync(&endpoint, peer_id, &request).await {
+                    Ok(payload) => match parse_sync_payload(payload) {
+                        Ok(verified) => {
+                            let (sessions, turns) = verified.into_inner();
+                            let now = Instant::now();
+                            let session_count = sessions.len();
+                            let turn_count = turns.len();
+                            for s in sessions {
+                                let _ = tx.send((now, InEvent::RemoteSession(s)));
+                            }
+                            for t in turns {
+                                let _ = tx.send((
+                                    now,
+                                    InEvent::RemoteTurn {
+                                        from_device: to_device,
+                                        turn: t,
+                                    },
+                                ));
+                            }
+                            info!(sessions = session_count, turns = turn_count, "P2P 补传完成");
+                        }
+                        Err(e) => error!(%e, "P2P 补传数据校验失败"),
+                    },
+                    Err(e) => error!(%e, "P2P 补传请求失败"),
+                }
+            });
+        }
+    }
+
+    Ok(())
 }
 
 // ── 内部辅助 ────────────────────────────────────────────────────────
@@ -345,91 +586,15 @@ async fn init_topic(
     Ok(topic)
 }
 
-async fn run_sync_loop(
-    db: Arc<std::sync::Mutex<ChatDb>>,
-    device_id: DeviceId,
-    endpoint: Endpoint,
-    topic: distributed_topic_tracker::Topic,
-    event_tx: broadcast::Sender<SyncEvent>,
-) {
-    let Ok(mut receiver) = topic.gossip_receiver().await else {
-        error!("无法获取 gossip receiver");
-        return;
-    };
-    info!("后台同步循环已启动");
-
-    loop {
-        match receiver.next().await {
-            Ok(GossipEvent::Received(msg)) => {
-                match serde_json::from_slice::<SyncAnnouncement>(&msg.content) {
-                    Ok(announcement) => {
-                        if let Err(e) = process_remote_announcement(
-                            &db,
-                            device_id,
-                            &endpoint,
-                            msg.delivered_from,
-                            announcement,
-                        )
-                        .await
-                        {
-                            error!(%e, "处理远程公告失败");
-                        }
-                    }
-                    Err(e) => warn!(%e, "解析远程公告失败"),
-                }
-            }
-            Ok(GossipEvent::NeighborUp(peer)) => {
-                info!(%peer, "邻居上线——通知上层广播");
-                let _ = event_tx.send(SyncEvent::NeighborUp);
-            }
-            Ok(GossipEvent::NeighborDown(peer)) => info!(%peer, "邻居下线"),
-            Ok(GossipEvent::Lagged) => warn!("gossip 消息滞后"),
-            Err(e) => {
-                error!(%e, "gossip receiver 错误");
-                break;
-            }
-        }
-    }
+/// 锁定数据库，PoisonError 转 `DatabaseLock`。
+fn lock_db(
+    db: &Arc<std::sync::Mutex<ChatDb>>,
+) -> SyncEngineResult<std::sync::MutexGuard<'_, ChatDb>> {
+    db.lock().map_err(|_| SyncEngineError::DatabaseLock)
 }
 
-async fn process_remote_announcement(
-    db: &Arc<std::sync::Mutex<ChatDb>>,
-    device_id: DeviceId,
-    endpoint: &Endpoint,
-    from_peer: EndpointId,
-    announcement: SyncAnnouncement,
-) -> SyncEngineResult<()> {
-    if announcement.device_id == device_id {
-        return Ok(());
-    }
-    info!(
-        from_device = %announcement.device_id,
-        sessions = announcement.sessions.len(),
-        "收到远程同步公告"
-    );
-
-    let local_watermarks = {
-        let guard = lock_db(db)?;
-        guard.build_watermarks(device_id)?
-    };
-
-    let request = compute_sync_request(&local_watermarks, &announcement);
-    if request.need_sessions.is_empty() && request.need_turns.is_empty() {
-        return Ok(());
-    }
-    info!(
-        need_sessions = request.need_sessions.len(),
-        need_turns = request.need_turns.len(),
-        "需要同步数据"
-    );
-
-    let payload = request_sync(endpoint, from_peer, &request).await?;
-    let verified = parse_sync_payload(payload)?;
-
-    let guard = lock_db(db)?;
-    let count = guard.apply_verified_payload(&verified)?;
-    info!(turns_written = count, "同步数据已写入本地数据库");
-    Ok(())
+fn sync_net_err(e: impl Into<anyhow::Error>) -> SyncEngineError {
+    SyncEngineError::Network(e.into())
 }
 
 // ── 传输层 ──────────────────────────────────────────────────────────
@@ -441,7 +606,6 @@ struct SyncMessage {
 }
 
 impl SyncMessage {
-    /// 编码为线格式：魔数 + 4 字节大端长度 + JSON。
     fn to_wire(&self) -> SyncEngineResult<Vec<u8>> {
         let json = serde_json::to_vec(self)?;
         let mut data = SYNC_PROTO_MAGIC.to_vec();
@@ -450,7 +614,6 @@ impl SyncMessage {
         Ok(data)
     }
 
-    /// 从线格式解码。校验魔数和长度前缀。
     fn from_wire(buf: &[u8]) -> SyncEngineResult<Self> {
         if buf.len() < 8 || &buf[..4] != SYNC_PROTO_MAGIC {
             let received = buf[..buf.len().min(64)].to_vec();
@@ -482,13 +645,6 @@ impl SyncMessage {
     }
 }
 
-/// 锁定数据库，PoisonError 转 `DatabaseLock`。
-fn lock_db(
-    db: &Arc<std::sync::Mutex<ChatDb>>,
-) -> SyncEngineResult<std::sync::MutexGuard<'_, ChatDb>> {
-    db.lock().map_err(|_| SyncEngineError::DatabaseLock)
-}
-
 async fn request_sync(
     endpoint: &Endpoint,
     peer: EndpointId,
@@ -516,10 +672,6 @@ async fn request_sync(
     Ok(payload)
 }
 
-fn sync_net_err(e: impl Into<anyhow::Error>) -> SyncEngineError {
-    SyncEngineError::Network(e.into())
-}
-
 #[derive(Debug, Clone)]
 struct SyncHandler {
     db: Arc<std::sync::Mutex<ChatDb>>,
@@ -540,14 +692,12 @@ impl iroh::protocol::ProtocolHandler for SyncHandler {
     }
 }
 
-/// 处理入站同步连接：读取 SyncRequest → 查询数据库组装 SyncPayload → 写回响应。
 async fn handle_sync_connection(
     db: Arc<std::sync::Mutex<ChatDb>>,
     connection: iroh::endpoint::Connection,
 ) -> SyncEngineResult<()> {
     let (mut send, mut recv) = connection.accept_bi().await.map_err(sync_net_err)?;
 
-    // 读取请求
     let buf = recv.read_to_end(1024 * 1024).await.map_err(sync_net_err)?;
     let msg = SyncMessage::from_wire(&buf)?;
     let request = msg.into_request()?;
@@ -558,16 +708,16 @@ async fn handle_sync_connection(
         "收到同步请求"
     );
 
-    // 组装响应
     let payload = build_sync_payload(&db, &request)?;
+    let sessions_count = payload.sessions.len();
+    let turns_count = payload.turns.len();
 
     info!(
-        sessions = payload.sessions.len(),
-        turns = payload.turns.len(),
+        sessions = sessions_count,
+        turns = turns_count,
         "组装同步响应"
     );
 
-    // 写回响应
     let response = SyncMessage {
         request: None,
         payload: Some(payload),
@@ -582,7 +732,6 @@ async fn handle_sync_connection(
     Ok(())
 }
 
-/// 根据 SyncRequest 从数据库查询并组装 SyncPayload。
 fn build_sync_payload(
     db: &Arc<std::sync::Mutex<ChatDb>>,
     request: &SyncRequest,
@@ -592,7 +741,6 @@ fn build_sync_payload(
     let mut sessions = Vec::new();
     let mut turns = Vec::new();
 
-    // 请求完整会话：包含会话快照 + 所有轮次
     for session_id in &request.need_sessions {
         if let Some(snapshot) = guard.get_session_snapshot(*session_id)? {
             sessions.push(snapshot);
@@ -601,7 +749,6 @@ fn build_sync_payload(
         }
     }
 
-    // 请求增量轮次：仅获取指定起始位置之后的轮次
     for (session_id, start_turn) in &request.need_turns {
         let session_turns = guard.get_turns_from(*session_id, *start_turn)?;
         turns.extend(session_turns);

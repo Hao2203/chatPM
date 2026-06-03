@@ -6,10 +6,11 @@ use chat_pm_session::{
     session::{NewSession, SessionId},
     ChatError,
 };
-use chat_pm_sync::DeviceId;
+use chat_pm_sync::{DeviceId, TurnSnapshot};
 use serde::Serialize;
 use std::str::FromStr;
 use std::sync::Arc;
+use std::time::Instant;
 use tauri::{async_runtime, Emitter, Manager, State};
 use tokio::sync::Mutex;
 use tracing::{info, warn};
@@ -83,15 +84,23 @@ struct SyncStatusPayload {
 const SUPPORTED_MODELS: &[&str] = &["deepseek-v4-flash", "deepseek-v4-pro"];
 const DEFAULT_MODEL: &str = "deepseek-v4-flash";
 
-/// Load DeviceId from config or create and persist a new one.
-fn load_or_create_device_id(db: &Arc<std::sync::Mutex<ChatDb>>) -> Result<DeviceId, AppError> {
+/// 加载或生成设备身份密钥（ed25519），并派生 DeviceId。
+///
+/// 首次启动时生成随机密钥并持久化；后续启动从 DB 读取。
+/// DeviceId = 公钥的 32 字节。
+fn load_or_create_identity(
+    db: &Arc<std::sync::Mutex<ChatDb>>,
+) -> Result<(DeviceId, [u8; 32]), AppError> {
     let guard = db.lock().map_err(|_| AppError::locked())?;
-    if let Some(hex) = guard.get_config("device_id")? {
-        DeviceId::from_hex(&hex).map_err(|_| AppError::new(ErrorKind::Internal, "无效的设备 ID"))
+    if let Some(hex) = guard.get_config("device_secret_key")? {
+        let secret_bytes =
+            hex_to_bytes(&hex).ok_or_else(|| AppError::new(ErrorKind::Internal, "无效的设备密钥"))?;
+        let device_id = DeviceId::from_secret_key(&secret_bytes);
+        Ok((device_id, secret_bytes))
     } else {
-        let device_id = DeviceId::generate();
-        guard.set_config("device_id", &device_id.to_hex())?;
-        Ok(device_id)
+        let (device_id, key_bytes) = DeviceId::generate_identity();
+        guard.set_config("device_secret_key", &bytes_to_hex(&key_bytes))?;
+        Ok((device_id, key_bytes))
     }
 }
 
@@ -139,7 +148,6 @@ fn hex_char_to_val(c: u8) -> Option<u8> {
 async fn restore_sync_engine(
     app: tauri::AppHandle,
     db: Arc<std::sync::Mutex<ChatDb>>,
-    device_id: DeviceId,
 ) {
     let (secret_key_bytes, ticket_str) = {
         let guard = match db.lock() {
@@ -190,7 +198,6 @@ async fn restore_sync_engine(
     let engine = match SyncEngine::join(
         db.clone(),
         SyncConfig::default(),
-        device_id,
         Some(secret_key_bytes),
         ticket,
     )
@@ -378,6 +385,35 @@ async fn send_message(
                 completion_tokens,
             },
         );
+
+        // ── 通知同步引擎 ──────────────────────────────────────
+        let app_state = app_handle.state::<AppState>();
+        let turn_snapshot = {
+            let db_guard = match app_state.db.lock() {
+                Ok(g) => g,
+                Err(_) => return,
+            };
+            match db_guard.recent_turns(sid, 1) {
+                Ok(turns) => {
+                    turns.first().map(|t| TurnSnapshot {
+                        turn_id: t.turn_id,
+                        session_id: t.session_id,
+                        turn_num: t.turn_num,
+                        user_text: t.user_text.clone(),
+                        assistant_text: t.assistant_text.clone(),
+                        created_at: t.created_at,
+                        device_id: t.device_id.unwrap_or(app_state.device_id),
+                    })
+                }
+                Err(_) => None,
+            }
+        };
+        if let Some(snapshot) = turn_snapshot {
+            let engine_guard = app_state.sync_engine.lock().await;
+            if let Some(ref engine) = *engine_guard {
+                engine.handle_new_turn(Instant::now(), snapshot);
+            }
+        }
     });
 
     Ok(())
@@ -516,10 +552,9 @@ async fn init_and_create_sync_doc(
     state: State<'_, AppState>,
 ) -> Result<String, AppError> {
     let db = Arc::clone(&state.db);
-    let device_id = state.device_id;
 
     let engine =
-        SyncEngine::create(db.clone(), SyncConfig::default(), device_id, None).await?;
+        SyncEngine::create(db.clone(), SyncConfig::default(), None).await?;
     let ticket = engine.ticket().to_string();
     let secret_key_bytes = engine.secret_key_bytes();
 
@@ -547,11 +582,10 @@ async fn join_sync_doc(
     ticket: String,
 ) -> Result<(), AppError> {
     let db = Arc::clone(&state.db);
-    let device_id = state.device_id;
     let doc_ticket = SyncTicket::from_str(&ticket)?;
 
     let engine =
-        SyncEngine::join(db.clone(), SyncConfig::default(), device_id, None, doc_ticket).await?;
+        SyncEngine::join(db.clone(), SyncConfig::default(), None, doc_ticket).await?;
     let secret_key_bytes = engine.secret_key_bytes();
 
     {
@@ -600,7 +634,7 @@ async fn publish_sync_announcement(state: State<'_, AppState>) -> Result<(), App
     let engine = guard
         .as_ref()
         .ok_or_else(|| AppError::new(ErrorKind::Validation, "同步引擎未启动"))?;
-    engine.publish_announcement().await?;
+    engine.handle_neighbor_up(Instant::now());
     Ok(())
 }
 
@@ -628,7 +662,7 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
 
             let db = Arc::new(std::sync::Mutex::new(raw_db));
 
-            let device_id = load_or_create_device_id(&db)?;
+            let (device_id, _identity_key) = load_or_create_identity(&db)?;
 
             let service = {
                 let guard = db.lock().map_err(|_| AppError::locked())?;
@@ -655,7 +689,7 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
             let handle = app.handle().clone();
             let restore_db = Arc::clone(&db);
             async_runtime::spawn(async move {
-                restore_sync_engine(handle, restore_db, device_id).await;
+                restore_sync_engine(handle, restore_db).await;
             });
 
             Ok(())

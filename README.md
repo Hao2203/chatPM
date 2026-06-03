@@ -54,6 +54,7 @@ bun run tauri build
 - DeepSeek API 流式集成
 - API 密钥界面化配置
 - 对话上下文记忆
+- **P2P 设备间实时同步** — 三层消息协议（TurnBroadcast + StateBroadcast + P2P 补传）、类型状态机驱动的协议引擎
 
 **规划中：**
 - 长对话自动摘要压缩
@@ -61,6 +62,42 @@ bun run tauri build
 - 多模型支持
 - 对话导入/导出
 - 自定义系统提示词
+
+## P2P 同步架构
+
+设备间通过 iroh gossip 网络实现实时会话同步。
+
+### 协议消息
+
+| 消息 | 触发条件 | 内容 |
+|------|---------|------|
+| `TurnBroadcast` | 本地新轮次（实时） | 轮次完整内容 |
+| `StateBroadcast(Full)` | 新上线 / 邻居上线 | 全量会话水位 |
+| `StateBroadcast(Incremental)` | 定期超时（30s） | 变更会话水位 |
+| P2P `SyncRequest` | 收到水位广播后比对缺失 | 按需补传 |
+
+### 核心组件
+
+- **`SyncMachine<S>`**（`chat_pm_sync`）— 纯类型状态机，`handle(now, event) → OutEvent`，零 I/O
+- **`SyncEngine`**（`chat_pm_commands`）— I/O 容器，`poll_timeout()` 驱动事件循环
+- **设备身份** — `DeviceId` = ed25519 公钥，从持久化私钥派生
+
+### 技术栈
+
+| 库 | 用途 |
+|----|------|
+| `iroh` 0.98 | P2P 端点、直连传输 |
+| `iroh-gossip` 0.98 | Gossip 主题广播 |
+| `distributed-topic-tracker` 0.3 | 分布式 topic 发现 |
+| `ed25519-dalek` | 设备身份密钥 |
+
+### 数据流
+
+```
+send_message → DB 写入 → handle_new_turn() → TurnBroadcast(gossip)
+                                                    ↓
+                                        其他节点 → WriteTurn(DB) + 乱序检测
+```
 
 ## 许可证
 

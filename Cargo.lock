@@ -922,6 +922,7 @@ dependencies = [
  "chat_pm_session",
  "chrono",
  "distributed-topic-tracker",
+ "ed25519-dalek",
  "iroh",
  "serde",
  "serde_json",
