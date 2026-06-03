@@ -93,8 +93,8 @@ fn load_or_create_identity(
 ) -> Result<(DeviceId, [u8; 32]), AppError> {
     let guard = db.lock().map_err(|_| AppError::locked())?;
     if let Some(hex) = guard.get_config("device_secret_key")? {
-        let secret_bytes =
-            hex_to_bytes(&hex).ok_or_else(|| AppError::new(ErrorKind::Internal, "无效的设备密钥"))?;
+        let secret_bytes = hex_to_bytes(&hex)
+            .ok_or_else(|| AppError::new(ErrorKind::Internal, "无效的设备密钥"))?;
         let device_id = DeviceId::from_secret_key(&secret_bytes);
         Ok((device_id, secret_bytes))
     } else {
@@ -145,10 +145,7 @@ fn hex_char_to_val(c: u8) -> Option<u8> {
     }
 }
 
-async fn restore_sync_engine(
-    app: tauri::AppHandle,
-    db: Arc<std::sync::Mutex<ChatDb>>,
-) {
+async fn restore_sync_engine(app: tauri::AppHandle, db: Arc<std::sync::Mutex<ChatDb>>) {
     let (secret_key_bytes, ticket_str) = {
         let guard = match db.lock() {
             Ok(g) => g,
@@ -394,17 +391,15 @@ async fn send_message(
                 Err(_) => return,
             };
             match db_guard.recent_turns(sid, 1) {
-                Ok(turns) => {
-                    turns.first().map(|t| TurnSnapshot {
-                        turn_id: t.turn_id,
-                        session_id: t.session_id,
-                        turn_num: t.turn_num,
-                        user_text: t.user_text.clone(),
-                        assistant_text: t.assistant_text.clone(),
-                        created_at: t.created_at,
-                        device_id: t.device_id.unwrap_or(app_state.device_id),
-                    })
-                }
+                Ok(turns) => turns.first().map(|t| TurnSnapshot {
+                    turn_id: t.turn_id,
+                    session_id: t.session_id,
+                    turn_num: t.turn_num,
+                    user_text: t.user_text.clone(),
+                    assistant_text: t.assistant_text.clone(),
+                    created_at: t.created_at,
+                    device_id: t.device_id.unwrap_or(app_state.device_id),
+                }),
                 Err(_) => None,
             }
         };
@@ -553,8 +548,7 @@ async fn init_and_create_sync_doc(
 ) -> Result<String, AppError> {
     let db = Arc::clone(&state.db);
 
-    let engine =
-        SyncEngine::create(db.clone(), SyncConfig::default(), None).await?;
+    let engine = SyncEngine::create(db.clone(), SyncConfig::default(), None).await?;
     let ticket = engine.ticket().to_string();
     let secret_key_bytes = engine.secret_key_bytes();
 
@@ -568,9 +562,14 @@ async fn init_and_create_sync_doc(
 
     *state.sync_engine.lock().await = Some(engine);
 
-    let _ = app.emit("sync-status-changed", SyncStatusPayload {
-        status: "syncing".to_string(), active: true, ticket: None,
-    });
+    let _ = app.emit(
+        "sync-status-changed",
+        SyncStatusPayload {
+            status: "syncing".to_string(),
+            active: true,
+            ticket: None,
+        },
+    );
 
     Ok(ticket)
 }
@@ -584,8 +583,7 @@ async fn join_sync_doc(
     let db = Arc::clone(&state.db);
     let doc_ticket = SyncTicket::from_str(&ticket)?;
 
-    let engine =
-        SyncEngine::join(db.clone(), SyncConfig::default(), None, doc_ticket).await?;
+    let engine = SyncEngine::join(db.clone(), SyncConfig::default(), None, doc_ticket).await?;
     let secret_key_bytes = engine.secret_key_bytes();
 
     {
@@ -598,9 +596,14 @@ async fn join_sync_doc(
 
     *state.sync_engine.lock().await = Some(engine);
 
-    let _ = app.emit("sync-status-changed", SyncStatusPayload {
-        status: "syncing".to_string(), active: true, ticket: None,
-    });
+    let _ = app.emit(
+        "sync-status-changed",
+        SyncStatusPayload {
+            status: "syncing".to_string(),
+            active: true,
+            ticket: None,
+        },
+    );
 
     Ok(())
 }
@@ -646,6 +649,7 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
         .plugin(
             tauri_plugin_log::Builder::new()
                 .level(tauri_plugin_log::log::LevelFilter::Info)
+                .filter(|metadata| !metadata.target().starts_with("mainline::rpc::socket"))
                 .targets([tauri_plugin_log::Target::new(
                     tauri_plugin_log::TargetKind::Stdout,
                 )])
