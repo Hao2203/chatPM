@@ -1,5 +1,8 @@
 use crate::{
-    language::Language, memory::Memory, message::{ChatMessage, UserInput}, session::SessionId,
+    language::Language,
+    memory::Memory,
+    message::{ChatMessage, UserInput},
+    session::SessionId,
     summarization::Summary,
 };
 

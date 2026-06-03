@@ -7,7 +7,7 @@ use logforth::{
     record::{Level, LevelFilter},
 };
 
-use crate::session::{ChatService, ChatConfig};
+use crate::session::{ChatConfig, ChatService};
 use chat_pm_database::ChatDb;
 
 #[tokio::test]

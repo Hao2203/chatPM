@@ -292,9 +292,7 @@ fn spawn_event_loop(
         // ── 初始 NeighborUp 广播 ──────────────────────────────────
         let now = Instant::now();
         for out in machine.handle(now, InEvent::NeighborUp) {
-            if let Err(e) =
-                dispatch_out(&topic, &db, &endpoint, &backfill_tx, out).await
-            {
+            if let Err(e) = dispatch_out(&topic, &db, &endpoint, &backfill_tx, out).await {
                 error!(%e, "初始广播失败");
             }
         }

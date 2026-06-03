@@ -69,7 +69,10 @@ impl ReplyReceiver {
 
     pub fn finish(self, stop_reason: StopReason, completion_tokens: usize) -> FinalAnswer {
         let truncation_warning = if stop_reason == StopReason::MaxTokens {
-            Some("Response truncated due to length limit. Please try a more specific question.".to_string())
+            Some(
+                "Response truncated due to length limit. Please try a more specific question."
+                    .to_string(),
+            )
         } else {
             None
         };

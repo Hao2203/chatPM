@@ -8,9 +8,7 @@ use rusqlite::{Connection, params};
 use serde::{Deserialize, Serialize};
 
 use chat_pm_session::{chat::TurnId, memory::Memory, session::SessionId};
-use chat_pm_sync::{
-    DeviceId, SessionSnapshot, SessionWatermark, TurnSnapshot, VerifiedPayload,
-};
+use chat_pm_sync::{DeviceId, SessionSnapshot, SessionWatermark, TurnSnapshot, VerifiedPayload};
 use uuid::Uuid;
 
 // ── Schema ──────────────────────────────────────────────────────────
@@ -600,7 +598,9 @@ impl ChatDb {
     pub fn get_session_snapshot(&self, session_id: SessionId) -> DbResult<Option<SessionSnapshot>> {
         let conn = self.lock_conn()?;
         Ok(conn
-            .prepare_cached("SELECT session_id, created_at, title FROM sessions WHERE session_id = ?1")?
+            .prepare_cached(
+                "SELECT session_id, created_at, title FROM sessions WHERE session_id = ?1",
+            )?
             .query_row(params![session_id.as_uuid()], |row| {
                 let sid: Uuid = row.get(0)?;
                 let created_at: i64 = row.get(1)?;
@@ -626,31 +626,28 @@ impl ChatDb {
              WHERE session_id = ?1 AND turn_num >= ?2 AND device_id IS NOT NULL
              ORDER BY turn_num ASC",
         )?;
-        let rows = stmt.query_map(
-            params![session_id.as_uuid(), start_turn as i64],
-            |row| {
-                let turn_uuid: Uuid = row.get(0)?;
-                let turn_num: i64 = row.get(1)?;
-                let sid: Uuid = row.get(2)?;
-                let created_at: i64 = row.get(5)?;
-                let device_blob: Option<Vec<u8>> = row.get(6)?;
-                let did = device_blob
-                    .and_then(|b| {
-                        let arr: [u8; 32] = b.try_into().ok()?;
-                        Some(DeviceId::from_bytes(arr))
-                    })
-                    .unwrap_or_else(DeviceId::generate);
-                Ok(TurnSnapshot {
-                    turn_id: TurnId::from_uuid(turn_uuid),
-                    turn_num: turn_num as u64,
-                    session_id: SessionId::from_uuid(sid),
-                    user_text: row.get(3)?,
-                    assistant_text: row.get(4)?,
-                    created_at: from_sql_timestamp(created_at)?,
-                    device_id: did,
+        let rows = stmt.query_map(params![session_id.as_uuid(), start_turn as i64], |row| {
+            let turn_uuid: Uuid = row.get(0)?;
+            let turn_num: i64 = row.get(1)?;
+            let sid: Uuid = row.get(2)?;
+            let created_at: i64 = row.get(5)?;
+            let device_blob: Option<Vec<u8>> = row.get(6)?;
+            let did = device_blob
+                .and_then(|b| {
+                    let arr: [u8; 32] = b.try_into().ok()?;
+                    Some(DeviceId::from_bytes(arr))
                 })
-            },
-        )?;
+                .unwrap_or_else(DeviceId::generate);
+            Ok(TurnSnapshot {
+                turn_id: TurnId::from_uuid(turn_uuid),
+                turn_num: turn_num as u64,
+                session_id: SessionId::from_uuid(sid),
+                user_text: row.get(3)?,
+                assistant_text: row.get(4)?,
+                created_at: from_sql_timestamp(created_at)?,
+                device_id: did,
+            })
+        })?;
         Ok(rows.collect::<Result<Vec<_>, _>>()?)
     }
 
