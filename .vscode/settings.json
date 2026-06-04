@@ -111,12 +111,12 @@
       "name": "lib",
       "mode": "debug",
       "targets": [
-        "chat_pm_commands"
+        "chat_pm_service"
       ],
       "features": [],
       "arguments": [],
       "envVars": [],
-      "workspaceMember": "chat_pm_commands",
+      "workspaceMember": "chat_pm_service",
       "checkedWorkspaceMembers": []
     },
     {

@@ -24,7 +24,7 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 chat_pm_session = { workspace = true }
 chat_pm_database = { workspace = true }
-chat_pm_commands = { workspace = true }
+chat_pm_service = { workspace = true }
 chat_pm_deepseek = { workspace = true }
 chat_pm_sync = { workspace = true }
 tokio = { workspace = true }

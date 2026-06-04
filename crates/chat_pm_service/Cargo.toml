@@ -1,5 +1,5 @@
 [package]
-name = "chat_pm_commands"
+name = "chat_pm_service"
 version = "0.1.0"
 edition = "2024"
 

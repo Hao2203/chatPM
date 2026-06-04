@@ -155,7 +155,7 @@ crates/my_api_client/
 
 ### 位置
 
-组装代码放在最上层的 crate（例如 `chat_pm_commands`）或应用入口（`src-tauri` / `main.rs`）。
+组装代码放在最上层的 crate（例如 `chat_pm_service`）或应用入口（`src-tauri` / `main.rs`）。
 
 ### 职责
 

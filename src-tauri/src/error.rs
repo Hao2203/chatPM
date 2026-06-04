@@ -1,5 +1,5 @@
-use chat_pm_commands::session::CommandError;
-use chat_pm_commands::sync_engine::SyncEngineError;
+use chat_pm_service::session::CommandError;
+use chat_pm_service::sync_engine::SyncEngineError;
 use chat_pm_database::DbError;
 use chat_pm_deepseek::ApiError;
 use chat_pm_session::ChatError;

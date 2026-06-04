@@ -1,6 +1,6 @@
 [workspace]
 members = [
-    "crates/chat_pm_commands",
+    "crates/chat_pm_service",
     "crates/chat_pm_session",
     "crates/chat_pm_database",
     "crates/chat_pm_deepseek",
@@ -19,7 +19,7 @@ base64ct = "1.8"
 chat_pm_session = { path = "crates/chat_pm_session" }
 chat_pm_database = { path = "crates/chat_pm_database" }
 chat_pm_deepseek = { path = "crates/chat_pm_deepseek" }
-chat_pm_commands = { path = "crates/chat_pm_commands" }
+chat_pm_service = { path = "crates/chat_pm_service" }
 chat_pm_sync = { path = "crates/chat_pm_sync" }
 chrono = { version = "0.4", features = ["serde"] }
 derive_more = { version = "2", features = ["from", "into", "as_ref"] }

@@ -849,34 +849,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "chat_pm_commands"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "chat_pm_database",
- "chat_pm_deepseek",
- "chat_pm_session",
- "chat_pm_sync",
- "chrono",
- "distributed-topic-tracker",
- "dotenvy",
- "ed25519-dalek",
- "futures-lite",
- "http",
- "iroh",
- "iroh-blobs",
- "iroh-gossip",
- "logforth",
- "secrecy",
- "serde",
- "serde_json",
- "thiserror 2.0.18",
- "tokio",
- "tracing",
- "uuid",
-]
-
-[[package]]
 name = "chat_pm_database"
 version = "0.1.0"
 dependencies = [
@@ -902,6 +874,34 @@ dependencies = [
  "serde_json",
  "thiserror 2.0.18",
  "tokio",
+]
+
+[[package]]
+name = "chat_pm_service"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "chat_pm_database",
+ "chat_pm_deepseek",
+ "chat_pm_session",
+ "chat_pm_sync",
+ "chrono",
+ "distributed-topic-tracker",
+ "dotenvy",
+ "ed25519-dalek",
+ "futures-lite",
+ "http",
+ "iroh",
+ "iroh-blobs",
+ "iroh-gossip",
+ "logforth",
+ "secrecy",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "tokio",
+ "tracing",
+ "uuid",
 ]
 
 [[package]]
@@ -935,9 +935,9 @@ name = "chatpm"
 version = "0.1.0"
 dependencies = [
  "anyhow",
- "chat_pm_commands",
  "chat_pm_database",
  "chat_pm_deepseek",
+ "chat_pm_service",
  "chat_pm_session",
  "chat_pm_sync",
  "serde",

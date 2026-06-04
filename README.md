@@ -79,7 +79,7 @@ bun run tauri build
 ### 核心组件
 
 - **`SyncMachine<S>`**（`chat_pm_sync`）— 纯类型状态机，`handle(now, event) → OutEvent`，零 I/O
-- **`SyncEngine`**（`chat_pm_commands`）— I/O 容器，`poll_timeout()` 驱动事件循环
+- **`SyncEngine`**（`chat_pm_service`）— I/O 容器，`poll_timeout()` 驱动事件循环
 - **设备身份** — `DeviceId` = ed25519 公钥，从持久化私钥派生
 
 ### 技术栈

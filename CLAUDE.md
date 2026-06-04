@@ -19,7 +19,7 @@ chatPM 是一个本地优先的聊天应用，未来将支持端到端加密同�
 | `chat_pm_session`     | 核心领域类型和纯函数                    | **否**（仅同步） | `ChatError`     |
 | `chat_pm_database`    | 通过 `rusqlite`（`bundled`）存储 SQLite | 否               | `DbError`       |
 | `chat_pm_deepseek`    | DeepSeek API 流式客户端                 | 是（tokio）      | `ApiError`      |
-| `chat_pm_commands`    | 业务逻辑管道、会话编排                  | 是（tokio）      | `PipelineError` |
+| `chat_pm_service`     | 业务逻辑管道、会话编排                  | 是（tokio）      | `PipelineError` |
 | `src-tauri`（chatpm） | Tauri 应用二进制、Tauri 命令、应用状态  | 是               | `AppError`      |
 
 ### 依赖层次
@@ -30,7 +30,7 @@ chat_pm_session          ← 零内部依赖（仅 derive_more、uuid）
 chat_pm_database         ← + rusqlite（bundled）、chrono、serde
 chat_pm_deepseek         ← + reqwest、secrecy、tokio
     ↑
-chat_pm_commands         ← 依赖以上三个，+ uuid、tracing
+chat_pm_service          ← 依赖以上三个，+ uuid、tracing
     ↑
 src-tauri（chatpm）       ← 依赖所有 crate，+ tauri、tokio、uuid
 ```
@@ -180,7 +180,7 @@ CREATE TABLE config (
 
 ---
 
-## `chat_pm_commands` — 业务逻辑
+## `chat_pm_service` — 业务逻辑
 
 ### `ChatPipeline`
 
@@ -310,7 +310,7 @@ API key 存储在 SQLite 数据库的 `config` 表中（`key="api_key"`）。启
 | ---------- | --------------------- | --------------------------------------------- | -------------------------------------------- |
 | 领域层     | `ChatError`           | `chat_pm_session::error`                      | 违反业务逻辑约束（会话不存在、标题未生成等） |
 | 外部接口层 | `ApiError`、`DbError` | `chat_pm_deepseek::error`、`chat_pm_database` | API 调用失败、数据库操作失败                 |
-| 命令层     | `PipelineError`       | `chat_pm_commands::session`                   | 组合 Chat + Api + Db + Internal              |
+| 命令层     | `PipelineError`       | `chat_pm_service::session`                    | 组合 Chat + Api + Db + Internal              |
 | 接口层     | `AppError`            | `src-tauri::error`                            | Tauri 命令返回值，序列化为 `{kind, message}` |
 
 **`ChatError`（`crates/chat_pm_session/src/error.rs`）— 纯粹的业务逻辑违反：**
@@ -360,7 +360,7 @@ pub type DbResult<T> = Result<T, DbError>;
 - `ChatDb` 所有公共方法返回 `DbResult<T>`
 - `lock_conn()` 私有方法封装 `Mutex::lock()`，返回 `DbResult<MutexGuard<_>>`
 
-**`PipelineError`（`crates/chat_pm_commands/src/session.rs`）— 命令层统一错误：**
+**`PipelineError`（`crates/chat_pm_service/src/session.rs`）— 命令层统一错误：**
 
 ```rust
 #[derive(Debug, thiserror::Error)]
@@ -453,14 +453,14 @@ emit("chat-done")
 
 ### Rust 后端
 
-集成测试在 `crates/chat_pm_commands/src/tests.rs` 中 — 集成测试（`demo`）：
+集成测试在 `crates/chat_pm_service/src/tests.rs` 中 — 集成测试（`demo`）：
 
 1. 从 `.env` 加载 `DEEPSEEK_API_KEY`
 2. 创建 `ChatDb::open_in_memory()` + `ChatPipeline`
 3. 运行多轮对话
 4. 模拟跨"HTTP 请求"的会话恢复
 
-运行：`cargo test --package chat_pm_commands`
+运行：`cargo test --package chat_pm_service`
 
 ### 前端
 
@@ -559,7 +559,7 @@ impl SyncMachine<SyncSyncing> {
 
 **增量广播脏标记：** `SessionState.dirty: bool` — 新轮次置 `true`，Timeout 广播后置 `false`。避免每次超时都广播全量水位。
 
-### 同步引擎（`crates/chat_pm_commands/src/sync_engine.rs`）
+### 同步引擎（`crates/chat_pm_service/src/sync_engine.rs`）
 
 `SyncEngine` 是非泛型 I/O 容器，内部状态机在后台事件循环中运行：
 
@@ -722,11 +722,11 @@ dispatch(BroadcastGossip(TurnBroadcast))
 - 通过 `TitlePrompt` + 类型驱动状态机实现 AI 标题生成
 - 通过 `rusqlite`（`chat_pm_database`）实现 SQLite 存储 — WAL 模式、bundled
 - DeepSeek 流式客户端（`chat_pm_deepseek`）
-- 带会话生命周期的聊天管道（`chat_pm_commands`）
+- 带会话生命周期的聊天管道（`chat_pm_service`）
 - 基于事件流式传输的 Tauri 命令（`src-tauri`）
 - 聊天 UI，含会话列表、标题显示、流式传输、API key 配置（SvelteKit）
 - **同步协议状态机**（`chat_pm_sync`）— `SyncMachine<S>` 类型状态机、`InEvent`/`OutEvent` 事件驱动、`GossipMessage` 三层消息体系、乱序检测（`BTreeSet` + `contiguous`）
-- **同步引擎**（`chat_pm_commands`）— `SyncEngine` I/O 容器、`poll_timeout()` 驱动事件循环、`TurnBroadcast` 实时广播 + P2P 直连补传、`handle_new_turn()` / `handle_neighbor_up()` API
+- **同步引擎**（`chat_pm_service`）— `SyncEngine` I/O 容器、`poll_timeout()` 驱动事件循环、`TurnBroadcast` 实时广播 + P2P 直连补传、`handle_new_turn()` / `handle_neighbor_up()` API
 - **设备身份** — `DeviceId` = ed25519 公钥，从 `device_secret_key` 派生，与 `EndpointId` 不可失败互转
 - **数据库同步方法** — `build_watermarks()`、`get_session_snapshot()`、`get_turns_from()`、`upsert_turn()`、`upsert_session()`、`apply_verified_payload()`
 - **Tauri 同步命令** — `get_sync_status`、`init_and_create_sync_doc`、`join_sync_doc`、`stop_sync`、`publish_sync_announcement`
