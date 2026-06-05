@@ -10,6 +10,7 @@ use chat_pm_database::ChatDb;
 use std::sync::Arc;
 use tauri::async_runtime;
 use tauri::Manager;
+use tauri_plugin_log::log;
 use tokio::sync::Mutex;
 
 /// 自动从 DB 加载已存储的 API key 并尝试构建 ChatService，若有效则初始化 pipeline。
@@ -21,16 +22,32 @@ fn try_load_service(
     crate::utils::build_service(&guard, &raw_key).ok()
 }
 
+fn log_targets() -> Vec<tauri_plugin_log::Target> {
+    use tauri_plugin_log::{Target, TargetKind};
+    let targets = vec![
+        Target::new(TargetKind::Stdout),
+        Target::new(TargetKind::LogDir {
+            file_name: Some("chatpm.log".to_string()),
+        }),
+    ];
+    targets
+}
+
+fn log_filter(metadata: &log::Metadata) -> bool {
+    !(metadata.target().starts_with("mainline::rpc::socket")
+        || (metadata.level() >= log::Level::Info
+            && metadata.target().starts_with("iroh::socket::transports"))
+        || metadata.target().starts_with("tracing::span"))
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() -> Result<(), Box<dyn std::error::Error>> {
     tauri::Builder::default()
         .plugin(
             tauri_plugin_log::Builder::new()
                 .level(tauri_plugin_log::log::LevelFilter::Info)
-                .filter(|metadata| !metadata.target().starts_with("mainline::rpc::socket"))
-                .targets([tauri_plugin_log::Target::new(
-                    tauri_plugin_log::TargetKind::Stdout,
-                )])
+                .filter(log_filter)
+                .targets(log_targets())
                 .build(),
         )
         .plugin(tauri_plugin_opener::init())
