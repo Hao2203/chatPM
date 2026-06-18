@@ -1,16 +1,17 @@
 use std::collections::HashMap;
 use std::sync::Mutex;
 
-use crate::chunk::DocumentChunk;
+use crate::chunk::{ChunkId, DocumentChunk, DocumentId};
 use crate::error::KnowledgeError;
-use crate::vector_store::{ScoredPoint, SearchResult, VectorStore};
+
+use super::{ScoredPoint, SearchResult, VectorStore};
 
 /// 基于内存 HashMap + 暴力余弦相似度的向量存储实现。
 ///
 /// 用于测试，不依赖 qdrant-edge。
 pub struct InMemoryVectorStore {
     /// chunk_id -> (vector, chunk_info)
-    entries: Mutex<HashMap<String, (Vec<f32>, ScoredPoint)>>,
+    entries: Mutex<HashMap<ChunkId, (Vec<f32>, ScoredPoint)>>,
     /// 向量维度
     dimension: usize,
 }
@@ -22,6 +23,11 @@ impl InMemoryVectorStore {
             entries: Mutex::new(HashMap::new()),
             dimension,
         }
+    }
+
+    /// 返回向量维度。
+    pub fn dimension(&self) -> usize {
+        self.dimension
     }
 }
 
@@ -37,19 +43,20 @@ impl VectorStore for InMemoryVectorStore {
             ));
         }
 
-        let mut entries = self.entries.lock().map_err(|e| {
-            KnowledgeError::VectorStoreError(format!("Lock poisoned: {}", e))
-        })?;
+        let mut entries = self
+            .entries
+            .lock()
+            .map_err(|e| KnowledgeError::VectorStoreError(format!("Lock poisoned: {}", e)))?;
 
         for (chunk, vector) in chunks.iter().zip(vectors.iter()) {
             let point = ScoredPoint {
-                chunk_id: chunk.chunk_id.to_string(),
+                chunk_id: chunk.chunk_id,
                 document_id: chunk.document_id.clone(),
                 chunk_index: chunk.chunk_index,
                 content: chunk.content.clone(),
                 score: 0.0,
             };
-            entries.insert(chunk.chunk_id.to_string(), (vector.clone(), point));
+            entries.insert(chunk.chunk_id, (vector.clone(), point));
         }
 
         Ok(())
@@ -59,17 +66,18 @@ impl VectorStore for InMemoryVectorStore {
         &self,
         query_vector: &[f32],
         limit: usize,
-        filter_doc_id: Option<&str>,
+        filter_doc_id: Option<&DocumentId>,
     ) -> Result<Vec<SearchResult>, KnowledgeError> {
-        let entries = self.entries.lock().map_err(|e| {
-            KnowledgeError::VectorStoreError(format!("Lock poisoned: {}", e))
-        })?;
+        let entries = self
+            .entries
+            .lock()
+            .map_err(|e| KnowledgeError::VectorStoreError(format!("Lock poisoned: {}", e)))?;
 
         let mut scored: Vec<SearchResult> = entries
             .iter()
             .filter(|(_, (_, point))| {
                 if let Some(doc_id) = filter_doc_id {
-                    point.document_id == doc_id
+                    &point.document_id == doc_id
                 } else {
                     true
                 }
@@ -77,7 +85,7 @@ impl VectorStore for InMemoryVectorStore {
             .map(|(_, (vec, point))| {
                 let similarity = cosine_similarity(query_vector, vec);
                 SearchResult {
-                    chunk_id: point.chunk_id.clone(),
+                    chunk_id: point.chunk_id,
                     document_id: point.document_id.clone(),
                     chunk_index: point.chunk_index,
                     content: point.content.clone(),
@@ -87,7 +95,11 @@ impl VectorStore for InMemoryVectorStore {
             .collect();
 
         // 按分数降序排序
-        scored.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal));
+        scored.sort_by(|a, b| {
+            b.score
+                .partial_cmp(&a.score)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
 
         // 截取 top-k
         scored.truncate(limit);
@@ -95,20 +107,22 @@ impl VectorStore for InMemoryVectorStore {
         Ok(scored)
     }
 
-    fn delete_document(&self, document_id: &str) -> Result<usize, KnowledgeError> {
-        let mut entries = self.entries.lock().map_err(|e| {
-            KnowledgeError::VectorStoreError(format!("Lock poisoned: {}", e))
-        })?;
+    fn delete_document(&self, document_id: &DocumentId) -> Result<usize, KnowledgeError> {
+        let mut entries = self
+            .entries
+            .lock()
+            .map_err(|e| KnowledgeError::VectorStoreError(format!("Lock poisoned: {}", e)))?;
 
         let before = entries.len();
-        entries.retain(|_, (_, point)| point.document_id != document_id);
+        entries.retain(|_, (_, point)| &point.document_id != document_id);
         Ok(before - entries.len())
     }
 
     fn clear(&self) -> Result<(), KnowledgeError> {
-        let mut entries = self.entries.lock().map_err(|e| {
-            KnowledgeError::VectorStoreError(format!("Lock poisoned: {}", e))
-        })?;
+        let mut entries = self
+            .entries
+            .lock()
+            .map_err(|e| KnowledgeError::VectorStoreError(format!("Lock poisoned: {}", e)))?;
         entries.clear();
         Ok(())
     }
@@ -132,14 +146,15 @@ pub(crate) fn cosine_similarity(a: &[f32], b: &[f32]) -> f32 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::chunk::ChunkId;
+    use crate::chunk::{ChunkId, DocumentId};
     use crate::embed::Embed;
+    use crate::knowledge_base::KnowledgeBaseId;
 
     fn make_chunk(content: &str, doc_id: &str, index: usize) -> DocumentChunk {
         DocumentChunk {
             chunk_id: ChunkId::new(),
-            knowledge_base_id: "test_kb".to_string(),
-            document_id: doc_id.to_string(),
+            knowledge_base_id: KnowledgeBaseId::new(),
+            document_id: DocumentId::new(doc_id),
             chunk_index: index,
             content: content.to_string(),
             char_count: content.len(),
@@ -149,7 +164,7 @@ mod tests {
     #[test]
     fn upsert_and_search() {
         let store = InMemoryVectorStore::new(8);
-        let embedder = crate::mock_embed::MockEmbedder::new(8);
+        let embedder = crate::embed::MockEmbedder::new(8);
 
         let chunks = vec![
             make_chunk("Rust is a systems programming language", "doc1", 0),
@@ -165,20 +180,25 @@ mod tests {
         store.upsert_chunks(&chunks, &vectors).unwrap();
 
         // 搜索与 doc1/chunk0 完全相同文本 → 应该得到最高分
-        let query_vec = embedder.embed("Rust is a systems programming language").unwrap();
+        let query_vec = embedder
+            .embed("Rust is a systems programming language")
+            .unwrap();
         let results = store.search(&query_vec, 2, None).unwrap();
 
         assert_eq!(results.len(), 2);
         // 完全匹配的文本余弦相似度应为 1.0
-        assert!((results[0].score - 1.0).abs() < 0.001,
-            "expected score ~1.0, got {}", results[0].score);
+        assert!(
+            (results[0].score - 1.0).abs() < 0.001,
+            "expected score ~1.0, got {}",
+            results[0].score
+        );
         assert!(results[0].content.contains("Rust"));
     }
 
     #[test]
     fn search_with_document_filter() {
         let store = InMemoryVectorStore::new(16);
-        let embedder = crate::mock_embed::MockEmbedder::new(16);
+        let embedder = crate::embed::MockEmbedder::new(16);
 
         let chunks = vec![
             make_chunk("Rust content", "doc1", 0),
@@ -193,18 +213,20 @@ mod tests {
         store.upsert_chunks(&chunks, &vectors).unwrap();
 
         let query_vec = embedder.embed("content").unwrap();
-        let results = store.search(&query_vec, 10, Some("doc1")).unwrap();
+        let results = store
+            .search(&query_vec, 10, Some(&DocumentId::new("doc1")))
+            .unwrap();
 
         // 只返回 doc1 的结果
         for r in &results {
-            assert_eq!(r.document_id, "doc1");
+            assert_eq!(r.document_id, DocumentId::new("doc1"));
         }
     }
 
     #[test]
     fn delete_document() {
         let store = InMemoryVectorStore::new(16);
-        let embedder = crate::mock_embed::MockEmbedder::new(16);
+        let embedder = crate::embed::MockEmbedder::new(16);
 
         let chunks = vec![
             make_chunk("Rust content", "doc1", 0),
@@ -218,19 +240,19 @@ mod tests {
 
         store.upsert_chunks(&chunks, &vectors).unwrap();
 
-        let deleted = store.delete_document("doc1").unwrap();
+        let deleted = store.delete_document(&DocumentId::new("doc1")).unwrap();
         assert_eq!(deleted, 1);
 
         let query_vec = embedder.embed("content").unwrap();
         let results = store.search(&query_vec, 10, None).unwrap();
         assert_eq!(results.len(), 1);
-        assert_eq!(results[0].document_id, "doc2");
+        assert_eq!(results[0].document_id, DocumentId::new("doc2"));
     }
 
     #[test]
     fn clear_removes_all() {
         let store = InMemoryVectorStore::new(16);
-        let embedder = crate::mock_embed::MockEmbedder::new(16);
+        let embedder = crate::embed::MockEmbedder::new(16);
 
         let chunks = vec![make_chunk("test", "doc1", 0)];
         let vectors = vec![embedder.embed("test").unwrap()];

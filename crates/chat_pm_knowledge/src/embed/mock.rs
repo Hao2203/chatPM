@@ -1,4 +1,4 @@
-use crate::embed::Embed;
+use super::Embed;
 use crate::error::KnowledgeError;
 
 /// Mock 嵌入器，返回基于文本长度的确定性向量。

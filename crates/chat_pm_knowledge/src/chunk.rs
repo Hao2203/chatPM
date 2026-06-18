@@ -1,14 +1,23 @@
+use std::sync::Arc;
+
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
+use crate::knowledge_base::KnowledgeBaseId;
+
 /// 文本块的唯一标识符。
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub struct ChunkId(Uuid);
 
 impl ChunkId {
     /// 生成一个新的块 ID。
     pub fn new() -> Self {
         Self(Uuid::now_v7())
+    }
+
+    /// 从已有的 Uuid 构造。
+    pub fn from_uuid(uuid: Uuid) -> Self {
+        Self(uuid)
     }
 
     /// 获取内部 Uuid。
@@ -23,9 +32,51 @@ impl std::fmt::Display for ChunkId {
     }
 }
 
+impl std::str::FromStr for ChunkId {
+    type Err = uuid::Error;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        Uuid::parse_str(s).map(Self)
+    }
+}
+
 impl Default for ChunkId {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+/// 文档的逻辑标识符（文件路径、URL、或用户给定的名称）。
+///
+/// 约束：非空字符串。
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct DocumentId(Arc<str>);
+
+impl DocumentId {
+    /// 从字符串创建文档标识符。
+    pub fn new(id: impl AsRef<str>) -> Self {
+        Self(Arc::from(id.as_ref().trim()))
+    }
+
+    /// 检查标识符是否有效。
+    pub fn is_valid(&self) -> bool {
+        !self.0.is_empty()
+    }
+
+    /// 获取内部字符串引用。
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+
+    /// 消耗并返回内部字符串。
+    pub fn into_inner(self) -> Arc<str> {
+        self.0
+    }
+}
+
+impl std::fmt::Display for DocumentId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.0)
     }
 }
 
@@ -35,9 +86,9 @@ pub struct DocumentChunk {
     /// 块的唯一标识。
     pub chunk_id: ChunkId,
     /// 所属知识库 ID。
-    pub knowledge_base_id: String,
+    pub knowledge_base_id: KnowledgeBaseId,
     /// 逻辑文档标识（文件名或用户给定标题）。
-    pub document_id: String,
+    pub document_id: DocumentId,
     /// 块在文档中的位置（从 0 开始）。
     pub chunk_index: usize,
     /// 块文本内容。
@@ -191,7 +242,14 @@ fn apply_overlap(chunks: &[String], overlap: usize, _max_size: usize) -> Vec<Str
 
         // 从前一个块的末尾取 overlap 个字符作为前缀
         if prev.len() > overlap {
-            let overlap_text: String = prev.chars().rev().take(overlap).collect::<Vec<_>>().into_iter().rev().collect();
+            let overlap_text: String = prev
+                .chars()
+                .rev()
+                .take(overlap)
+                .collect::<Vec<_>>()
+                .into_iter()
+                .rev()
+                .collect();
             let merged = format!("{} {}", overlap_text, current);
             result.push(merged);
         } else {

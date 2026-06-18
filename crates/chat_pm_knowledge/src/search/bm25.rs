@@ -1,9 +1,9 @@
 use std::collections::HashMap;
 
-use crate::bm25_index::Bm25Index;
-use crate::chunk::DocumentChunk;
+use crate::chunk::{ChunkId, DocumentChunk, DocumentId};
 use crate::error::KnowledgeError;
-use crate::vector_store::SearchResult;
+
+use crate::store::SearchResult;
 
 /// BM25 参数。
 #[derive(Debug, Clone)]
@@ -20,6 +20,23 @@ impl Default for Bm25Params {
     }
 }
 
+/// BM25 关键词搜索索引 trait。
+///
+/// 提供精确的关键词匹配能力，与向量语义搜索互补。
+pub trait Bm25Index: Send + Sync {
+    /// 向索引中添加文本块。
+    fn add_chunks(&mut self, chunks: &[DocumentChunk]) -> Result<(), KnowledgeError>;
+
+    /// 从索引中移除指定文档的所有块。
+    fn remove_document(&mut self, document_id: &DocumentId) -> Result<usize, KnowledgeError>;
+
+    /// 关键词搜索，返回 Top-K 结果。
+    fn search(&self, query: &str, limit: usize) -> Result<Vec<SearchResult>, KnowledgeError>;
+
+    /// 清空索引。
+    fn clear(&mut self) -> Result<(), KnowledgeError>;
+}
+
 /// 基于自实现 BM25 的内存关键词搜索索引。
 ///
 /// 不依赖外部 BM25 crate，算法直接实现，稳定可控。
@@ -27,9 +44,9 @@ pub struct InMemoryBm25Index {
     /// 所有已索引的文本块。
     chunks: Vec<DocumentChunk>,
     /// chunk_id → 分词结果（词 → 词频）
-    term_freqs: HashMap<String, HashMap<String, u32>>,
+    term_freqs: HashMap<ChunkId, HashMap<String, u32>>,
     /// chunk_id → 文档长度（词数）
-    doc_lengths: HashMap<String, f32>,
+    doc_lengths: HashMap<ChunkId, f32>,
     /// 语料库中每个词出现的文档数
     doc_freqs: HashMap<String, u32>,
     /// 平均文档长度
@@ -67,7 +84,7 @@ impl InMemoryBm25Index {
         self.doc_freqs.clear();
 
         // 计算每个词的文档频率
-        for (_, tf) in &self.term_freqs {
+        for tf in self.term_freqs.values() {
             for term in tf.keys() {
                 *self.doc_freqs.entry(term.clone()).or_insert(0) += 1;
             }
@@ -119,7 +136,7 @@ impl InMemoryBm25Index {
     /// 计算 BM25 分数。
     ///
     /// BM25(D, Q) = Σ IDF(qi) * (f(qi,D) * (k1+1)) / (f(qi,D) + k1 * (1-b + b*|D|/avgdl))
-    fn bm25_score(&self, query_terms: &[String], chunk_id: &str) -> f32 {
+    fn bm25_score(&self, query_terms: &[String], chunk_id: &ChunkId) -> f32 {
         let tf = match self.term_freqs.get(chunk_id) {
             Some(tf) => tf,
             None => return 0.0,
@@ -170,8 +187,8 @@ impl Bm25Index for InMemoryBm25Index {
                 *tf.entry(term.clone()).or_insert(0) += 1;
             }
 
-            let chunk_id = chunk.chunk_id.to_string();
-            self.term_freqs.insert(chunk_id.clone(), tf);
+            let chunk_id = chunk.chunk_id;
+            self.term_freqs.insert(chunk_id, tf);
             self.doc_lengths.insert(chunk_id, doc_len);
             self.chunks.push(chunk.clone());
         }
@@ -180,15 +197,15 @@ impl Bm25Index for InMemoryBm25Index {
         Ok(())
     }
 
-    fn remove_document(&mut self, document_id: &str) -> Result<usize, KnowledgeError> {
+    fn remove_document(&mut self, document_id: &DocumentId) -> Result<usize, KnowledgeError> {
         let before = self.chunks.len();
 
         // 找到要移除的 chunk_id 列表
-        let ids_to_remove: Vec<String> = self
+        let ids_to_remove: Vec<ChunkId> = self
             .chunks
             .iter()
-            .filter(|c| c.document_id == document_id)
-            .map(|c| c.chunk_id.to_string())
+            .filter(|c| &c.document_id == document_id)
+            .map(|c| c.chunk_id)
             .collect();
 
         for id in &ids_to_remove {
@@ -196,7 +213,7 @@ impl Bm25Index for InMemoryBm25Index {
             self.doc_lengths.remove(id);
         }
 
-        self.chunks.retain(|c| c.document_id != document_id);
+        self.chunks.retain(|c| &c.document_id != document_id);
 
         if before != self.chunks.len() {
             self.recompute_stats();
@@ -217,7 +234,7 @@ impl Bm25Index for InMemoryBm25Index {
             .iter()
             .enumerate()
             .map(|(idx, chunk)| {
-                let score = self.bm25_score(&query_terms, &chunk.chunk_id.to_string());
+                let score = self.bm25_score(&query_terms, &chunk.chunk_id);
                 (score, idx)
             })
             .collect();
@@ -232,7 +249,7 @@ impl Bm25Index for InMemoryBm25Index {
             .map(|(score, idx)| {
                 let chunk = &self.chunks[idx];
                 SearchResult {
-                    chunk_id: chunk.chunk_id.to_string(),
+                    chunk_id: chunk.chunk_id,
                     document_id: chunk.document_id.clone(),
                     chunk_index: chunk.chunk_index,
                     content: chunk.content.clone(),
@@ -255,13 +272,14 @@ impl Bm25Index for InMemoryBm25Index {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::chunk::ChunkId;
+    use crate::chunk::{ChunkId, DocumentId};
+    use crate::knowledge_base::KnowledgeBaseId;
 
     fn make_chunk(content: &str, doc_id: &str, index: usize) -> DocumentChunk {
         DocumentChunk {
             chunk_id: ChunkId::new(),
-            knowledge_base_id: "test_kb".to_string(),
-            document_id: doc_id.to_string(),
+            knowledge_base_id: KnowledgeBaseId::new(),
+            document_id: DocumentId::new(doc_id),
             chunk_index: index,
             content: content.to_string(),
             char_count: content.len(),
@@ -296,11 +314,11 @@ mod tests {
             ])
             .unwrap();
 
-        let removed = index.remove_document("doc1").unwrap();
+        let removed = index.remove_document(&DocumentId::new("doc1")).unwrap();
         assert_eq!(removed, 1);
 
         let results = index.search("Rust", 10).unwrap();
-        assert!(results.iter().all(|r| r.document_id != "doc1"));
+        assert!(results.iter().all(|r| r.document_id != DocumentId::new("doc1")));
     }
 
     #[test]

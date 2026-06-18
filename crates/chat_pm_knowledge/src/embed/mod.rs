@@ -1,4 +1,12 @@
+mod mock;
+#[cfg(feature = "onnx")]
+mod onnx;
+
 use crate::error::KnowledgeError;
+
+pub use mock::MockEmbedder;
+#[cfg(feature = "onnx")]
+pub use onnx::OnnxEmbedder;
 
 /// 文本嵌入 trait。
 ///

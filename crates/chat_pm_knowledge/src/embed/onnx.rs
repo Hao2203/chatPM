@@ -1,6 +1,6 @@
 use std::path::Path;
 
-use crate::embed::Embed;
+use super::Embed;
 use crate::error::KnowledgeError;
 
 /// 基于 ONNX Runtime 的嵌入器（占位实现）。
@@ -35,8 +35,14 @@ impl Embed for OnnxEmbedder {
 // ===== feature = "onnx" 的实现 =====
 
 #[cfg(feature = "onnx")]
+use std::sync::Mutex;
+
+#[cfg(feature = "onnx")]
+use ort::{inputs, session::Session, value::Tensor};
+
+#[cfg(feature = "onnx")]
 pub struct OnnxEmbedder {
-    session: ort::Session,
+    session: Mutex<Session>,
     tokenizer: tokenizers::Tokenizer,
     dimension: usize,
 }
@@ -60,39 +66,36 @@ impl OnnxEmbedder {
             )));
         }
 
-        let session = ort::Session::builder()
-            .map_err(|e| {
-                KnowledgeError::EmbeddingError(format!("创建 ONNX session 失败: {}", e))
-            })?
+        let session = Session::builder()
+            .map_err(|e| KnowledgeError::EmbeddingError(format!("创建 ONNX session 失败: {}", e)))?
             .commit_from_file(&model_path)
-            .map_err(|e| {
-                KnowledgeError::EmbeddingError(format!("加载 ONNX 模型失败: {}", e))
-            })?;
+            .map_err(|e| KnowledgeError::EmbeddingError(format!("加载 ONNX 模型失败: {}", e)))?;
 
-        let tokenizer = tokenizers::Tokenizer::from_file(&tokenizer_path).map_err(|e| {
-            KnowledgeError::EmbeddingError(format!("加载 tokenizer 失败: {}", e))
-        })?;
+        let tokenizer = tokenizers::Tokenizer::from_file(&tokenizer_path)
+            .map_err(|e| KnowledgeError::EmbeddingError(format!("加载 tokenizer 失败: {}", e)))?;
 
         let dimension = 384;
 
-        // 预热
-        let _ = Self::run_inference(&session, &tokenizer, "warmup")?;
-
-        Ok(Self {
-            session,
+        let embedder = Self {
+            session: Mutex::new(session),
             tokenizer,
             dimension,
-        })
+        };
+
+        // 预热
+        let _ = embedder.embed("warmup")?;
+
+        Ok(embedder)
     }
 
     fn run_inference(
-        session: &ort::Session,
+        session: &Mutex<Session>,
         tokenizer: &tokenizers::Tokenizer,
         text: &str,
     ) -> Result<Vec<f32>, KnowledgeError> {
-        let encoding = tokenizer.encode(text, true).map_err(|e| {
-            KnowledgeError::EmbeddingError(format!("tokenize 失败: {}", e))
-        })?;
+        let encoding = tokenizer
+            .encode(text, true)
+            .map_err(|e| KnowledgeError::EmbeddingError(format!("tokenize 失败: {}", e)))?;
 
         let input_ids: Vec<i64> = encoding.get_ids().iter().map(|&id| id as i64).collect();
         let attention_mask: Vec<i64> = encoding
@@ -100,70 +103,40 @@ impl OnnxEmbedder {
             .iter()
             .map(|&m| m as i64)
             .collect();
-        let token_type_ids: Vec<i64> = encoding
-            .get_type_ids()
-            .iter()
-            .map(|&t| t as i64)
-            .collect();
+        let token_type_ids: Vec<i64> = encoding.get_type_ids().iter().map(|&t| t as i64).collect();
 
         let seq_len = input_ids.len();
 
-        let input_ids_array = ndarray::Array2::from_shape_vec((1, seq_len), input_ids)
-            .map_err(|e| KnowledgeError::EmbeddingError(format!("reshape 失败: {}", e)))?;
-
-        let attention_mask_array =
-            ndarray::Array2::from_shape_vec((1, seq_len), attention_mask)
-                .map_err(|e| KnowledgeError::EmbeddingError(format!("reshape 失败: {}", e)))?;
-
-        let token_type_ids_array =
-            ndarray::Array2::from_shape_vec((1, seq_len), token_type_ids)
-                .map_err(|e| KnowledgeError::EmbeddingError(format!("reshape 失败: {}", e)))?;
-
-        let input_ids_tensor = ort::Value::from_array(
-            session
-                .inputs
-                .first()
-                .ok_or_else(|| KnowledgeError::EmbeddingError("模型没有输入".to_string()))?,
-            input_ids_array,
-        )
-        .map_err(|e| {
+        // 使用 tuple (shape, data) 创建张量，无需 ndarray 依赖
+        let input_ids_tensor = Tensor::from_array(([1usize, seq_len], input_ids)).map_err(|e| {
             KnowledgeError::EmbeddingError(format!("创建 input_ids tensor 失败: {}", e))
         })?;
 
-        let attention_mask_tensor = ort::Value::from_array(
-            &session.inputs[1],
-            attention_mask_array,
-        )
-        .map_err(|e| {
-            KnowledgeError::EmbeddingError(format!("创建 attention_mask tensor 失败: {}", e))
-        })?;
+        let attention_mask_tensor = Tensor::from_array(([1usize, seq_len], attention_mask))
+            .map_err(|e| {
+                KnowledgeError::EmbeddingError(format!("创建 attention_mask tensor 失败: {}", e))
+            })?;
 
-        let token_type_ids_tensor = ort::Value::from_array(
-            &session.inputs[2],
-            token_type_ids_array,
-        )
-        .map_err(|e| {
-            KnowledgeError::EmbeddingError(format!("创建 token_type_ids tensor 失败: {}", e))
-        })?;
+        let token_type_ids_tensor = Tensor::from_array(([1usize, seq_len], token_type_ids))
+            .map_err(|e| {
+                KnowledgeError::EmbeddingError(format!("创建 token_type_ids tensor 失败: {}", e))
+            })?;
+
+        let mut session = session
+            .lock()
+            .map_err(|e| KnowledgeError::EmbeddingError(format!("Session lock poisoned: {}", e)))?;
 
         let outputs = session
-            .run(vec![
+            .run(inputs![
                 input_ids_tensor,
                 attention_mask_tensor,
-                token_type_ids_tensor,
+                token_type_ids_tensor
             ])
             .map_err(|e| KnowledgeError::EmbeddingError(format!("推理失败: {}", e)))?;
 
-        let output = outputs
-            .first()
-            .ok_or_else(|| KnowledgeError::EmbeddingError("模型没有输出".to_string()))?;
-
-        let data: Vec<f32> = output
+        let (_shape, data) = outputs[0]
             .try_extract_tensor::<f32>()
-            .map_err(|e| KnowledgeError::EmbeddingError(format!("提取 tensor 失败: {}", e)))?
-            .iter()
-            .copied()
-            .collect();
+            .map_err(|e| KnowledgeError::EmbeddingError(format!("提取 tensor 失败: {}", e)))?;
 
         // Mean pooling
         let embedding_dim = data.len() / seq_len;

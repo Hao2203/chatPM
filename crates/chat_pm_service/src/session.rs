@@ -382,10 +382,10 @@ fn group_search_results_by_kb(
     let mut groups: HashMap<String, Vec<chat_pm_session::prompt::KnowledgeChunk>> = HashMap::new();
 
     for r in results {
-        let entry = groups.entry(r.document_id.clone()).or_default();
+        let entry = groups.entry(r.document_id.to_string()).or_default();
         entry.push(chat_pm_session::prompt::KnowledgeChunk {
             content: r.content,
-            document_title: r.document_id.clone(),
+            document_title: r.document_id.to_string(),
             score: r.score,
         });
     }

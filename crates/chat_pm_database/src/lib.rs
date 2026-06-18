@@ -820,7 +820,7 @@ impl ChatDb {
             })
         })?;
         rows.collect::<Result<Vec<_>, _>>()
-            .map_err(|e| DbError::Sql(e))
+            .map_err(DbError::Sql)
     }
 
     pub fn rename_knowledge_base(&self, kb_id: KnowledgeBaseId, new_name: &str) -> DbResult<()> {
@@ -901,7 +901,7 @@ impl ChatDb {
             })
         })?;
         rows.collect::<Result<Vec<_>, _>>()
-            .map_err(|e| DbError::Sql(e))
+            .map_err(DbError::Sql)
     }
 
     pub fn delete_document(&self, kb_id: KnowledgeBaseId, doc_id: &str) -> DbResult<bool> {
@@ -962,7 +962,7 @@ impl ChatDb {
             "SELECT kb_id FROM session_kb_refs WHERE session_id = ?1",
         )?;
         let rows = stmt.query_map(params![session_id.to_string()], |row| {
-            Ok(row.get::<_, String>(0)?)
+            row.get::<_, String>(0)
         })?;
         rows.collect::<Result<Vec<_>, _>>()
             .map(|ids| {
@@ -970,7 +970,7 @@ impl ChatDb {
                     .filter_map(|s| KnowledgeBaseId::from_str(&s).ok())
                     .collect()
             })
-            .map_err(|e| DbError::Sql(e))
+            .map_err(DbError::Sql)
     }
 }
 

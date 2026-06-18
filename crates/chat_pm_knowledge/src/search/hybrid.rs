@@ -1,8 +1,10 @@
-use crate::bm25_index::Bm25Index;
 use crate::embed::Embed;
 use crate::error::KnowledgeError;
-use crate::rrf::rrf_fuse;
-use crate::vector_store::{SearchResult, VectorStore};
+use crate::store::{SearchResult, VectorStore};
+
+use super::bm25::Bm25Index;
+
+use super::rrf::rrf_fuse;
 
 /// 混合检索器：同时执行 BM25 关键词搜索和向量语义搜索，通过 RRF 融合结果。
 pub struct HybridSearcher {
@@ -73,17 +75,17 @@ impl HybridSearcher {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::bm25_index::Bm25Index;
-    use crate::bm25_memory::InMemoryBm25Index;
-    use crate::chunk::{ChunkId, DocumentChunk};
-    use crate::memory_store::InMemoryVectorStore;
-    use crate::mock_embed::MockEmbedder;
+    use crate::chunk::{ChunkId, DocumentChunk, DocumentId};
+    use crate::embed::MockEmbedder;
+    use crate::knowledge_base::KnowledgeBaseId;
+    use crate::search::{Bm25Index, InMemoryBm25Index};
+    use crate::store::InMemoryVectorStore;
 
     fn make_chunk(content: &str, doc_id: &str, index: usize) -> DocumentChunk {
         DocumentChunk {
             chunk_id: ChunkId::new(),
-            knowledge_base_id: "test_kb".to_string(),
-            document_id: doc_id.to_string(),
+            knowledge_base_id: KnowledgeBaseId::new(),
+            document_id: DocumentId::new(doc_id),
             chunk_index: index,
             content: content.to_string(),
             char_count: content.len(),
@@ -123,7 +125,6 @@ mod tests {
 
         assert!(!results.is_empty());
         // "Rust" 相关内容应该在第一位（同时匹配关键词"系统编程"和语义相似）
-        // 注意：MockEmbedder 基于文本内容生成确定性向量，可能不完全反映语义
     }
 
     #[test]
@@ -183,13 +184,10 @@ mod tests {
             .unwrap();
 
         // 所有出现的 chunk_id 应该唯一
-        let mut ids: Vec<&str> = results.iter().map(|r| r.chunk_id.as_str()).collect();
+        let mut ids: Vec<ChunkId> = results.iter().map(|r| r.chunk_id).collect();
         ids.sort();
-        let deduped: Vec<&str> = {
-            let mut v = ids.clone();
-            v.dedup();
-            v
-        };
+        let mut deduped = ids.clone();
+        deduped.dedup();
         assert_eq!(ids.len(), deduped.len(), "结果集中不应有重复的 chunk_id");
     }
 }

@@ -3,7 +3,7 @@ use std::sync::{Arc, Mutex as StdMutex};
 
 use chat_pm_database::{ChatDb, DocRecord, KbRecord};
 use chat_pm_knowledge::{
-    Bm25Index, ChunkConfig, DocumentChunk, EdgeVectorStore, Embed, HybridSearcher,
+    Bm25Index, ChunkConfig, DocumentChunk, DocumentId, EdgeVectorStore, Embed, HybridSearcher,
     InMemoryBm25Index, KnowledgeBase, KnowledgeBaseId, KnowledgeBaseName, KnowledgeError,
     SearchResult, chunk_text,
 };
@@ -22,18 +22,15 @@ pub struct KnowledgeService {
     /// 已打开的 BM25 索引：kb_id -> InMemoryBm25Index。
     bm25_indexes: TokioMutex<std::collections::HashMap<KnowledgeBaseId, InMemoryBm25Index>>,
     /// 已打开的向量存储：kb_id -> EdgeVectorStore。
-    open_stores: TokioMutex<std::collections::HashMap<KnowledgeBaseId, Arc<StdMutex<EdgeVectorStore>>>>,
+    open_stores:
+        TokioMutex<std::collections::HashMap<KnowledgeBaseId, Arc<StdMutex<EdgeVectorStore>>>>,
     /// 混合检索器。
     searcher: HybridSearcher,
 }
 
 impl KnowledgeService {
     /// 创建新的知识库服务。
-    pub fn new(
-        db: ChatDb,
-        embedder: Arc<dyn Embed>,
-        stores_dir: PathBuf,
-    ) -> Self {
+    pub fn new(db: ChatDb, embedder: Arc<dyn Embed>, stores_dir: PathBuf) -> Self {
         Self {
             db,
             embedder,
@@ -49,9 +46,9 @@ impl KnowledgeService {
     /// 创建新的知识库。
     pub async fn create_kb(&self, name: &KnowledgeBaseName) -> Result<KnowledgeBase, CommandError> {
         if !name.is_valid() {
-            return Err(CommandError::Knowledge(KnowledgeError::KnowledgeBaseAlreadyExists(
-                "名称无效".to_string(),
-            )));
+            return Err(CommandError::Knowledge(
+                KnowledgeError::KnowledgeBaseAlreadyExists("名称无效".to_string()),
+            ));
         }
 
         let kb_id = KnowledgeBaseId::new();
@@ -62,8 +59,8 @@ impl KnowledgeService {
         // 创建 EdgeShard 目录
         let shard_dir = self.kb_dir(kb_id);
         let dimension = self.embedder.dimension();
-        let store = EdgeVectorStore::new(&shard_dir, dimension)
-            .map_err(|e| CommandError::Knowledge(e))?;
+        let store =
+            EdgeVectorStore::new(&shard_dir, dimension).map_err(CommandError::Knowledge)?;
 
         // 创建 BM25 索引
         let bm25_index = InMemoryBm25Index::new();
@@ -96,9 +93,9 @@ impl KnowledgeService {
         new_name: &KnowledgeBaseName,
     ) -> Result<(), CommandError> {
         if !new_name.is_valid() {
-            return Err(CommandError::Knowledge(KnowledgeError::KnowledgeBaseAlreadyExists(
-                "名称无效".to_string(),
-            )));
+            return Err(CommandError::Knowledge(
+                KnowledgeError::KnowledgeBaseAlreadyExists("名称无效".to_string()),
+            ));
         }
         Ok(self.db.rename_knowledge_base(kb_id, new_name.as_str())?)
     }
@@ -118,12 +115,10 @@ impl KnowledgeService {
         // 删除磁盘目录
         let shard_dir = self.kb_dir(kb_id);
         if shard_dir.exists() {
-            tokio::task::spawn_blocking(move || {
-                std::fs::remove_dir_all(&shard_dir)
-            })
-            .await
-            .map_err(|e| CommandError::Internal(e.into()))?
-            .ok();
+            tokio::task::spawn_blocking(move || std::fs::remove_dir_all(&shard_dir))
+                .await
+                .map_err(|e| CommandError::Internal(e.into()))?
+                .ok();
         }
 
         info!(%kb_id, "知识库已删除");
@@ -148,7 +143,7 @@ impl KnowledgeService {
             )));
         }
 
-        let doc_id = uuid::Uuid::now_v7().to_string();
+        let doc_id = DocumentId::new(uuid::Uuid::now_v7().to_string());
 
         // 构建 DocumentChunk 列表
         let chunks: Vec<DocumentChunk> = chunk_texts
@@ -156,7 +151,7 @@ impl KnowledgeService {
             .enumerate()
             .map(|(i, content)| DocumentChunk {
                 chunk_id: chat_pm_knowledge::ChunkId::new(),
-                knowledge_base_id: kb_id.to_string(),
+                knowledge_base_id: kb_id,
                 document_id: doc_id.clone(),
                 chunk_index: i,
                 content: content.clone(),
@@ -177,7 +172,7 @@ impl KnowledgeService {
             })
             .await
             .map_err(|e| CommandError::Internal(e.into()))?
-            .map_err(|e| CommandError::Knowledge(e))?
+            .map_err(CommandError::Knowledge)?
         };
 
         // 写入向量存储（同步操作，使用 spawn_blocking）
@@ -195,22 +190,20 @@ impl KnowledgeService {
             })
             .await
             .map_err(|e| CommandError::Internal(e.into()))?
-            .map_err(|e| CommandError::Knowledge(e))?;
+            .map_err(CommandError::Knowledge)?;
         }
 
         // 写入 BM25 索引
         {
             let mut bm25_map = self.bm25_indexes.lock().await;
-            let bm25 = bm25_map
-                .entry(kb_id)
-                .or_insert_with(InMemoryBm25Index::new);
+            let bm25 = bm25_map.entry(kb_id).or_insert_with(InMemoryBm25Index::new);
             bm25.add_chunks(&chunks)
-                .map_err(|e| CommandError::Knowledge(e))?;
+                .map_err(CommandError::Knowledge)?;
         }
 
         // 写入 SQLite
         let doc_record = DocRecord {
-            doc_id: doc_id.clone(),
+            doc_id: doc_id.to_string(),
             kb_id,
             title,
             chunk_count,
@@ -234,7 +227,10 @@ impl KnowledgeService {
     }
 
     /// 列出知识库中的所有文档。
-    pub async fn list_documents(&self, kb_id: KnowledgeBaseId) -> Result<Vec<DocRecord>, CommandError> {
+    pub async fn list_documents(
+        &self,
+        kb_id: KnowledgeBaseId,
+    ) -> Result<Vec<DocRecord>, CommandError> {
         Ok(self.db.list_documents(kb_id)?)
     }
 
@@ -249,7 +245,7 @@ impl KnowledgeService {
             let stores = self.open_stores.lock().await;
             if let Some(store) = stores.get(&kb_id) {
                 let store = store.clone();
-                let doc_id_owned = doc_id.to_string();
+                let doc_id_owned = DocumentId::new(doc_id);
                 tokio::task::spawn_blocking(move || {
                     let s = store.lock().map_err(|e| {
                         KnowledgeError::VectorStoreError(format!("Lock poisoned: {}", e))
@@ -258,7 +254,7 @@ impl KnowledgeService {
                 })
                 .await
                 .map_err(|e| CommandError::Internal(e.into()))?
-                .map_err(|e| CommandError::Knowledge(e))?;
+                .map_err(CommandError::Knowledge)?;
             }
         }
 
@@ -266,8 +262,8 @@ impl KnowledgeService {
         {
             let mut bm25_map = self.bm25_indexes.lock().await;
             if let Some(bm25) = bm25_map.get_mut(&kb_id) {
-                bm25.remove_document(doc_id)
-                    .map_err(|e| CommandError::Knowledge(e))?;
+                bm25.remove_document(&DocumentId::new(doc_id))
+                    .map_err(CommandError::Knowledge)?;
             }
         }
 
@@ -292,7 +288,7 @@ impl KnowledgeService {
 
         let store = self.get_or_open_store_inner(kb_id, &stores)?;
         let bm25 = bm25_map.get(&kb_id).ok_or_else(|| {
-            CommandError::Knowledge(KnowledgeError::KnowledgeBaseNotFound(kb_id.to_string()))
+            CommandError::Knowledge(KnowledgeError::KnowledgeBaseNotFound(kb_id))
         })?;
 
         // 嵌入查询向量
@@ -302,7 +298,7 @@ impl KnowledgeService {
             tokio::task::spawn_blocking(move || embedder.embed(&query_owned))
                 .await
                 .map_err(|e| CommandError::Internal(e.into()))?
-                .map_err(|e| CommandError::Knowledge(e))?
+                .map_err(CommandError::Knowledge)?
         };
 
         // 向量搜索（同步，使用 spawn_blocking）
@@ -318,19 +314,17 @@ impl KnowledgeService {
             })
             .await
             .map_err(|e| CommandError::Internal(e.into()))?
-            .map_err(|e| CommandError::Knowledge(e))?
+            .map_err(CommandError::Knowledge)?
         };
 
         // BM25 搜索
-        let bm25_results = bm25.search(query, top_k * 2)
-            .map_err(|e| CommandError::Knowledge(e))?;
+        let bm25_results = bm25
+            .search(query, top_k * 2)
+            .map_err(CommandError::Knowledge)?;
 
         // RRF 融合
-        let fused = chat_pm_knowledge::rrf_fuse(
-            &vector_results,
-            &bm25_results,
-            self.searcher.rrf_k,
-        );
+        let fused =
+            chat_pm_knowledge::rrf_fuse(&vector_results, &bm25_results, self.searcher.rrf_k);
 
         Ok(fused.into_iter().take(top_k).collect())
     }
@@ -360,12 +354,14 @@ impl KnowledgeService {
 
         // 按分数重新排序
         all_results.sort_by(|a, b| {
-            b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal)
+            b.score
+                .partial_cmp(&a.score)
+                .unwrap_or(std::cmp::Ordering::Equal)
         });
 
         // 去重
         let mut seen = std::collections::HashSet::new();
-        all_results.retain(|r| seen.insert(r.chunk_id.clone()));
+        all_results.retain(|r| seen.insert(r.chunk_id));
 
         Ok(all_results.into_iter().take(top_k).collect())
     }
@@ -393,7 +389,7 @@ impl KnowledgeService {
         } else {
             EdgeVectorStore::new(&shard_dir, self.embedder.dimension())
         }
-        .map_err(|e| CommandError::Knowledge(e))?;
+        .map_err(CommandError::Knowledge)?;
 
         Ok(Arc::new(StdMutex::new(store)))
     }

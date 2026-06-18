@@ -1,19 +1,21 @@
-use std::path::{Path, PathBuf};
+use std::path::Path;
+
+#[cfg(not(feature = "qdrant"))]
+use std::path::PathBuf;
+#[cfg(not(feature = "qdrant"))]
 use std::sync::Mutex;
 
-use crate::chunk::DocumentChunk;
+use crate::chunk::{DocumentChunk, DocumentId};
 use crate::error::KnowledgeError;
-use crate::vector_store::VectorStore;
 
 /// 基于 `qdrant-edge` 的向量存储（占位实现）。
 ///
 /// 当前使用内存存储替代，待 qdrant-edge API 稳定后切换为真正的磁盘存储。
 /// 此类型保留了磁盘路径接口，确保将来切换时 API 不变。
 #[cfg(not(feature = "qdrant"))]
-use crate::memory_store::InMemoryVectorStore as InnerStore;
-
-#[cfg(feature = "qdrant")]
-use crate::error::KnowledgeError;
+use super::memory::InMemoryVectorStore as InnerStore;
+#[cfg(not(feature = "qdrant"))]
+use super::VectorStore;
 
 #[cfg(not(feature = "qdrant"))]
 pub struct EdgeVectorStore {
@@ -33,9 +35,8 @@ impl EdgeVectorStore {
     pub fn new(path: &Path, dimension: usize) -> Result<Self, KnowledgeError> {
         // 确保目录存在
         if !path.exists() {
-            std::fs::create_dir_all(path).map_err(|e| {
-                KnowledgeError::VectorStoreError(format!("创建目录失败: {}", e))
-            })?;
+            std::fs::create_dir_all(path)
+                .map_err(|e| KnowledgeError::VectorStoreError(format!("创建目录失败: {}", e)))?;
         }
 
         Ok(Self {
@@ -63,9 +64,10 @@ impl EdgeVectorStore {
         chunks: &[DocumentChunk],
         vectors: &[Vec<f32>],
     ) -> Result<(), KnowledgeError> {
-        let store = self.inner.lock().map_err(|e| {
-            KnowledgeError::VectorStoreError(format!("Lock poisoned: {}", e))
-        })?;
+        let store = self
+            .inner
+            .lock()
+            .map_err(|e| KnowledgeError::VectorStoreError(format!("Lock poisoned: {}", e)))?;
         store.upsert_chunks(chunks, vectors)
     }
 
@@ -74,27 +76,30 @@ impl EdgeVectorStore {
         &self,
         query_vector: &[f32],
         limit: usize,
-        filter_doc_id: Option<&str>,
-    ) -> Result<Vec<crate::vector_store::SearchResult>, KnowledgeError> {
-        let store = self.inner.lock().map_err(|e| {
-            KnowledgeError::VectorStoreError(format!("Lock poisoned: {}", e))
-        })?;
+        filter_doc_id: Option<&DocumentId>,
+    ) -> Result<Vec<super::SearchResult>, KnowledgeError> {
+        let store = self
+            .inner
+            .lock()
+            .map_err(|e| KnowledgeError::VectorStoreError(format!("Lock poisoned: {}", e)))?;
         store.search(query_vector, limit, filter_doc_id)
     }
 
     /// 删除指定文档的所有块。
-    pub fn delete_document(&self, document_id: &str) -> Result<usize, KnowledgeError> {
-        let store = self.inner.lock().map_err(|e| {
-            KnowledgeError::VectorStoreError(format!("Lock poisoned: {}", e))
-        })?;
+    pub fn delete_document(&self, document_id: &DocumentId) -> Result<usize, KnowledgeError> {
+        let store = self
+            .inner
+            .lock()
+            .map_err(|e| KnowledgeError::VectorStoreError(format!("Lock poisoned: {}", e)))?;
         store.delete_document(document_id)
     }
 
     /// 清空所有数据。
     pub fn clear(&self) -> Result<(), KnowledgeError> {
-        let store = self.inner.lock().map_err(|e| {
-            KnowledgeError::VectorStoreError(format!("Lock poisoned: {}", e))
-        })?;
+        let store = self
+            .inner
+            .lock()
+            .map_err(|e| KnowledgeError::VectorStoreError(format!("Lock poisoned: {}", e)))?;
         store.clear()
     }
 
@@ -136,14 +141,14 @@ impl EdgeVectorStore {
         &self,
         _query_vector: &[f32],
         _limit: usize,
-        _filter_doc_id: Option<&str>,
-    ) -> Result<Vec<crate::vector_store::SearchResult>, KnowledgeError> {
+        _filter_doc_id: Option<&DocumentId>,
+    ) -> Result<Vec<super::SearchResult>, KnowledgeError> {
         Err(KnowledgeError::VectorStoreError(
             "qdrant-edge 集成尚未实现".to_string(),
         ))
     }
 
-    pub fn delete_document(&self, _document_id: &str) -> Result<usize, KnowledgeError> {
+    pub fn delete_document(&self, _document_id: &DocumentId) -> Result<usize, KnowledgeError> {
         Err(KnowledgeError::VectorStoreError(
             "qdrant-edge 集成尚未实现".to_string(),
         ))

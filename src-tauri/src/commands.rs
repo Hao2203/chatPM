@@ -580,8 +580,8 @@ pub(crate) async fn search_knowledge_base(
     Ok(results
         .into_iter()
         .map(|r| KbSearchResult {
-            chunk_id: r.chunk_id,
-            document_id: r.document_id,
+            chunk_id: r.chunk_id.to_string(),
+            document_id: r.document_id.to_string(),
             chunk_index: r.chunk_index,
             content: r.content,
             score: r.score,

@@ -4,7 +4,7 @@
 #[derive(Debug, Clone, thiserror::Error)]
 pub enum KnowledgeError {
     #[error("知识库 '{0}' 不存在")]
-    KnowledgeBaseNotFound(String),
+    KnowledgeBaseNotFound(crate::knowledge_base::KnowledgeBaseId),
 
     #[error("知识库名称 '{0}' 已存在")]
     KnowledgeBaseAlreadyExists(String),
