@@ -1,8 +1,30 @@
+# CLAUDE.md
+
+This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+
 # chatPM 项目技能
 
 ## 语言要求
 
 **Agent 必须使用中文回复用户。** 代码注释和提交信息建议用中文。
+
+## 常用命令
+
+所有前端操作使用 **bun**（项目根目录执行），Rust 操作用 cargo：
+
+```bash
+# 前端
+bun install              # 安装依赖
+bun run tauri dev        # 启动桌面应用（开发模式）
+bun run tauri build      # 生产构建
+bun run check            # 前端类型检查（svelte-kit sync && svelte-check）
+
+# Rust
+cargo fmt --all          # 格式化代码
+cargo clippy --all-targets  # Clippy 检查
+cargo test --package chat_pm_service   # 运行集成测试
+cargo test --package chat_pm_knowledge  # 运行知识库测试
+```
 
 ## 概述
 
@@ -19,7 +41,9 @@ chatPM 是一个本地优先的聊天应用，未来将支持端到端加密同�
 | `chat_pm_session`     | 核心领域类型和纯函数                    | **否**（仅同步） | `ChatError`     |
 | `chat_pm_database`    | 通过 `rusqlite`（`bundled`）存储 SQLite | 否               | `DbError`       |
 | `chat_pm_deepseek`    | DeepSeek API 流式客户端                 | 是（tokio）      | `ApiError`      |
-| `chat_pm_service`     | 业务逻辑管道、会话编排                  | 是（tokio）      | `PipelineError` |
+| `chat_pm_knowledge`   | 本地知识库引擎（分块/向量/BM25/混合检索）| 是（tokio）     | `KnowledgeError`|
+| `chat_pm_sync`        | P2P 同步协议状态机（纯类型驱动）         | **否**（仅同步） | `SyncError`     |
+| `chat_pm_service`     | 业务逻辑管道、会话编排、同步引擎、知识库| 是（tokio）      | `CommandError`  |
 | `src-tauri`（chatpm） | Tauri 应用二进制、Tauri 命令、应用状态  | 是               | `AppError`      |
 
 ### 依赖层次
@@ -30,7 +54,10 @@ chat_pm_session          ← 零内部依赖（仅 derive_more、uuid）
 chat_pm_database         ← + rusqlite（bundled）、chrono、serde
 chat_pm_deepseek         ← + reqwest、secrecy、tokio
     ↑
-chat_pm_service          ← 依赖以上三个，+ uuid、tracing
+chat_pm_knowledge        ← + tokenizers、ort（ONNX）、serde
+chat_pm_sync             ← + iroh、iroh-gossip、ed25519-dalek、serde
+    ↑
+chat_pm_service          ← 依赖以上所有，+ uuid、tracing、tokio
     ↑
 src-tauri（chatpm）       ← 依赖所有 crate，+ tauri、tokio、uuid
 ```
@@ -72,11 +99,11 @@ NewSession { session_id: SessionId }
             │
             └── .compose() → Vec<ChatMessage>   // 纯函数：组装提示词
             │
-            └── pipeline.finalize_session(tp)   // 调用 LLM，持久化标题
+            └── service.finalize_session(tp)   // 调用 LLM，持久化标题
                 │
                 └── Session { session_id, title: Title }
                     │
-                    └── pipeline.chat(&session, user_input)
+                    └── service.chat(&session, user_input)
 ```
 
 **类型安全保障：**
@@ -84,7 +111,7 @@ NewSession { session_id: SessionId }
 - `NewSession` 不能直接对话 — 没有 `chat` 方法
 - `into_title_prompt(self)` 消耗 `NewSession`，防止重复生成标题
 - `finalize_session(TitlePrompt)` 消耗 `TitlePrompt`，标题生成仅一次
-- 恢复已有标题的会话：`pipeline.resume_session(SessionId) → Result<Session>`
+- 恢复已有标题的会话：`service.resume_session(SessionId) → Result<Session>`
 
 ### 领域 Newtype 模式
 
@@ -150,6 +177,11 @@ CREATE TABLE config (
 | `load_recent_memory(session_id, n) -> Vec<Memory>`        | 最近 N 轮作为 Memory 对     |
 | `next_turn_id(session_id) -> TurnId`                      | `MAX(turn_num) + 1`         |
 | `stats() -> DbStats`                                      | 会话和轮次计数              |
+| `delete_session(session_id)`                              | 删除会话及所有轮次           |
+| `set_config(key, value)` / `get_config(key)`              | 键值对持久化（API key、模型等）|
+| `create_knowledge_base(kb_id, name)`                      | 创建知识库元数据记录         |
+| `set_session_kb_refs(session_id, kb_ids)`                 | 关联会话与知识库             |
+| `get_session_kb_refs(session_id) -> Vec<KnowledgeBaseId>` | 获取会话关联的知识库         |
 
 ### 关键类型
 
@@ -180,9 +212,60 @@ CREATE TABLE config (
 
 ---
 
+## `chat_pm_knowledge` — 本地知识库引擎
+
+为 chatPM 提供本地优先的资料库能力，支持语义 + 关键词混合检索。
+
+### 模块层次
+
+```text
+embed/    → 嵌入模型层（Embed trait + ONNX 本地 / Mock 测试）
+store/    → 存储后端层（EdgeVectorStore 持久化 + InMemoryVectorStore）
+search/   → 搜索组合层（BM25 自实现 + RRF 混合融合）
+```
+
+基础类型（`error`、`chunk`、`knowledge_base`）平铺在 crate 根层。
+
+### 关键类型
+
+| 文件 | 类型 | 说明 |
+|------|------|------|
+| `lib.rs` | `KnowledgeBaseId`、`KnowledgeBaseName`、`KnowledgeBase` | 知识库标识与领域对象 |
+| `chunk.rs` | `DocumentId`、`ChunkId`、`DocumentChunk`、`ChunkConfig` | 文档分块，支持中英文 `chunk_text()` |
+| `error.rs` | `KnowledgeError` | 知识库操作错误（重复、缺失、IO、嵌入失败等）|
+| `embed/mod.rs` | `Embed` trait | 可插拔嵌入接口（`dimension()` + `embed(texts)`）|
+| `embed/onnx.rs` | `OnnxEmbedder` | ONNX 运行时本地推理（需 `onnx` feature）|
+| `embed/mock.rs` | `MockEmbedder` | 测试用固定维度随机向量 |
+| `store/edge.rs` | `EdgeVectorStore` | 基于文件的分片持久化向量存储 |
+| `store/memory.rs` | `InMemoryVectorStore` | 内存向量存储（用于 BM25 索引）|
+| `search/bm25.rs` | `Bm25Index` trait + `InMemoryBm25Index` | 自实现 BM25，中英文 Unicode 分词 |
+| `search/hybrid.rs` | `HybridSearcher` | 组合向量搜索 + BM25 |
+| `search/rrf.rs` | `rrf_fuse()` | Reciprocal Rank Fusion 融合算法 |
+
+### KnowledgeService（`chat_pm_service::knowledge`）
+
+`KnowledgeService` 是 I/O 编排层，组合 `KnowledgeBase` + `Embed` + `EdgeVectorStore` + `HybridSearcher` + 数据库元数据：
+
+```rust
+pub struct KnowledgeService {
+    db: ChatDb,                          // SQLite 存储 KB/文档元数据
+    embedder: Arc<dyn Embed>,            // 可插拔嵌入器
+    stores_dir: PathBuf,                 // EdgeShard 存储目录
+    bm25_indexes: TokioMutex<HashMap<KnowledgeBaseId, InMemoryBm25Index>>,
+    open_stores: TokioMutex<HashMap<KnowledgeBaseId, Arc<Mutex<EdgeVectorStore>>>>,
+    searcher: HybridSearcher,            // 混合检索器
+}
+```
+
+**文档索引流程：** `add_kb_document` → `chunk_text()` 递归分块 → `embedder.embed(chunks)` 生成向量 → `EdgeVectorStore::upsert_batch()` 持久化 → `Bm25Index::add_document()` 建立关键词索引 → 数据库更新元数据
+
+**混合检索流程：** `hybrid_search(id, query, limit)` → 向量搜索（`embedder.embed(query)` → `EdgeVectorStore::search()`） + BM25 关键词搜索 → `rrf_fuse(vector_results, bm25_results, k=60)` → 按融合分数返回 top-K
+
+---
+
 ## `chat_pm_service` — 业务逻辑
 
-### `ChatPipeline`
+### `ChatService`
 
 通过类型驱动的会话生命周期编排完整流程：
 
@@ -198,24 +281,28 @@ CREATE TABLE config (
 ```
 create_session() → NewSession
     → new_session.into_title_prompt(user_input) → TitlePrompt
-    → pipeline.finalize_session(tp) → Session
-    → pipeline.chat(&session, user_input)
+    → service.finalize_session(tp) → Session
+    → service.chat(&session, user_input)
 ```
 
 **后续轮次：** `resume_session(id) → Session` → `chat(&session, input)`
 
-### `PipelineConfig`（默认值）
+### `ChatConfig`（默认值）
 
 | 字段                | 默认值                |
 | ------------------- | --------------------- |
-| `chat_model`        | `"deepseek-v4-flash"` |
+| `chat_model`        | `DeepSeekModel::V4Flash` |
 | `token_limit`       | 8192                  |
 | `reply_token_limit` | 2048                  |
 | `short_term_turns`  | 6                     |
 | `long_term_top_k`   | 4                     |
+| `context_window`    | 10                    |
+| `summary_ratio`     | 0.85                  |
+| `knowledge_top_k`   | 5                     |
 | `system_role`       | 中文助手提示词        |
 | `thinking_enabled`  | false                 |
 | `reasoning_effort`  | None                  |
+| `device_id`         | 启动时注入的设备身份  |
 
 环境变量覆盖：`CHAT_PM_REASONING_EFFORT`
 
@@ -227,28 +314,65 @@ create_session() → NewSession
 
 ```rust
 struct AppState {
-    db: ChatDb,                          // 持久化 SQLite
-    pipeline: Mutex<Option<ChatPipeline>>,  // 设置 API key 后初始化
+    db: Arc<Mutex<ChatDb>>,          // 持久化 SQLite（线程安全共享）
+    db_path: PathBuf,                 // 数据库文件路径
+    service: Mutex<Option<ChatService>>,   // 设置 API key 后初始化
+    sync_engine: Mutex<Option<SyncEngine>>, // 同步引擎（加入/创建后初始化）
+    device_id: DeviceId,              // 持久化设备身份
+    knowledge_service: Mutex<Option<Arc<KnowledgeService>>>,  // 知识库服务
+    knowledge_stores_dir: PathBuf,    // 知识库存储目录
 }
 ```
 
 数据库存储在 Tauri 的应用数据目录中（`$DATA_DIR/chatpm.db`）。
+设备身份在启动时通过 `load_or_create_identity()` 初始化：从 `config` 表读取 `device_secret_key` → 派生 ed25519 公钥 → `DeviceId`。
 
 ### 配置持久化
 
-API key 存储在 SQLite 数据库的 `config` 表中（`key="api_key"`）。启动时，`setup()` 尝试加载并验证已存储的 key，如果有效则自动初始化 pipeline。
+API key 和模型选择存储在 SQLite 数据库的 `config` 表中（`key="api_key"`、`key="model"`）。启动时，`setup()` 尝试加载并验证已存储的 key，如果有效则自动初始化 `ChatService`。
 
 ### Tauri 命令
 
+#### 核心聊天
+
 | 命令                   | 输入                  | 输出                   | 说明                                              |
 | ---------------------- | --------------------- | ---------------------- | ------------------------------------------------- |
-| `check_api_key`        | —                     | `bool`                 | pipeline 是否就绪                                 |
+| `check_api_key`        | —                     | `bool`                 | service 是否就绪                                 |
 | `create_session`       | —                     | `String`（session_id） | 在 DB 中创建 `NewSession`，返回 UUID              |
-| `set_api_key`          | `api_key: String`     | `()`                   | 验证、存储到 DB、初始化 pipeline                  |
+| `set_api_key`          | `api_key: String`     | `()`                   | 验证、存储到 DB、初始化 service                   |
+| `get_model`            | —                     | `String`               | 获取当前模型名                                    |
+| `set_model`            | `model: &str`         | `()`                   | 切换模型并重建 service                             |
 | `send_message`         | `session_id, content` | `()`                   | 状态机：首轮 `NewSession`→`TitlePrompt`→`Session` |
 | `list_sessions`        | —                     | `Vec<SessionInfo>`     | 所有会话，最新的在前                              |
-| `get_turns`            | `session_id`          | `Vec<TurnInfo>`        | 会话的所有轮次                                    |
+| `get_turns`            | `session_id`          | `Vec<TurnInfo>`        | 会话的所有轮次（最多 1000）                       |
 | `update_session_title` | `session_id, title`   | `()`                   | 手动编辑标题，发出事件                            |
+| `delete_session`       | `session_id`          | `()`                   | 删除会话及所有轮次，发出事件                      |
+| `clear_all_data`       | —                     | `()`                   | 删除数据库文件并重建，发出事件                    |
+
+#### 同步
+
+| 命令 | 输入 | 输出 | 说明 |
+|------|------|------|------|
+| `get_sync_status` | — | `SyncStatusPayload` | 查询同步状态 |
+| `init_and_create_sync_doc` | — | `String`（ticket） | 发起者：创建同步链 |
+| `join_sync_doc` | `ticket: String` | `()` | 加入者：凭 ticket 加入 |
+| `stop_sync` | — | `()` | 停止同步 |
+| `publish_sync_announcement` | — | `()` | 手动触发全量广播 |
+
+#### 知识库
+
+| 命令 | 输入 | 输出 | 说明 |
+|------|------|------|------|
+| `create_knowledge_base` | `name: String` | `KbInfo` | 创建知识库（SQLite 元数据 + EdgeShard + BM25 索引）|
+| `list_knowledge_bases` | — | `Vec<KbInfo>` | 所有知识库 |
+| `rename_knowledge_base` | `kb_id, new_name` | `()` | 重命名知识库 |
+| `delete_knowledge_base` | `kb_id` | `()` | 删除知识库及所有文档 |
+| `add_kb_document` | `kb_id, title, text` | `KbDocInfo` | 添加文档（自动分块、嵌入、索引）|
+| `list_kb_documents` | `kb_id` | `Vec<KbDocInfo>` | 知识库内所有文档 |
+| `delete_kb_document` | `kb_id, doc_id` | `()` | 删除文档及关联块 |
+| `search_knowledge_base` | `kb_id, query, limit?` | `Vec<KbSearchResult>` | 混合检索（向量 + BM25 RRF 融合）|
+| `set_session_kb_refs` | `session_id, kb_ids` | `()` | 关联会话与知识库 |
+| `get_session_kb_refs` | `session_id` | `Vec<String>` | 获取会话关联的知识库 ID |
 
 ### 基于事件的流式传输
 
@@ -284,7 +408,9 @@ API key 存储在 SQLite 数据库的 `config` 表中（`key="api_key"`）。启
 └──────────┴──────────────────────────────┘
 ```
 
-- **设置面板**：用于输入 DeepSeek API key 的模态覆盖层
+- **设置面板**：用于输入 DeepSeek API key、模型选择
+- **知识库管理面板**（`KbManageModal.svelte`）：创建/删除/重命名知识库、导入文档
+- **知识库选择器**（`KbSelector.svelte`）：选择会话关联的知识库
 - **流式传输**：进行中消息的光标闪烁动画
 - **会话列表**：侧边栏显示 created_at 时间戳，高亮当前活跃会话
 
@@ -310,7 +436,7 @@ API key 存储在 SQLite 数据库的 `config` 表中（`key="api_key"`）。启
 | ---------- | --------------------- | --------------------------------------------- | -------------------------------------------- |
 | 领域层     | `ChatError`           | `chat_pm_session::error`                      | 违反业务逻辑约束（会话不存在、标题未生成等） |
 | 外部接口层 | `ApiError`、`DbError` | `chat_pm_deepseek::error`、`chat_pm_database` | API 调用失败、数据库操作失败                 |
-| 命令层     | `PipelineError`       | `chat_pm_service::session`                    | 组合 Chat + Api + Db + Internal              |
+| 命令层     | `CommandError`       | `chat_pm_service::session`                    | 组合 Chat + Api + Db + Knowledge + Internal      |
 | 接口层     | `AppError`            | `src-tauri::error`                            | Tauri 命令返回值，序列化为 `{kind, message}` |
 
 **`ChatError`（`crates/chat_pm_session/src/error.rs`）— 纯粹的业务逻辑违反：**
@@ -360,19 +486,20 @@ pub type DbResult<T> = Result<T, DbError>;
 - `ChatDb` 所有公共方法返回 `DbResult<T>`
 - `lock_conn()` 私有方法封装 `Mutex::lock()`，返回 `DbResult<MutexGuard<_>>`
 
-**`PipelineError`（`crates/chat_pm_service/src/session.rs`）— 命令层统一错误：**
+**`CommandError`（`crates/chat_pm_service/src/session.rs`）— 命令层统一错误：**
 
 ```rust
 #[derive(Debug, thiserror::Error)]
-pub enum PipelineError {
+pub enum CommandError {
     #[error("[Chat Error] {0}")] Chat(#[from] ChatError),
     #[error("[Database Error] {0}")] Db(#[from] DbError),
     #[error("[API Error] {0}")] Api(#[from] ApiError),
+    #[error("[Knowledge Error] {0}")] Knowledge(#[from] KnowledgeError),
     #[error("[Internal Error] {0}")] Internal(#[from] anyhow::Error),
 }
 ```
 
-- `ChatPipeline` 所有方法返回 `Result<T, PipelineError>`
+- `ChatService` 所有方法返回 `Result<T, CommandError>`
 - `From` 自动转换子错误，调用方可匹配具体变体（如 `send_message` 中对 `SessionNotFound` | `TitleNotGenerated` 的特殊处理）
 
 **`AppError`（`src-tauri/src/error.rs`）— Tauri 接口序列化：**
@@ -385,7 +512,7 @@ pub struct AppError {
 }
 ```
 
-- 实现 `From<ChatError>`（kind=`"validation"`）、`From<DbError>`（kind=`"db"`）、`From<ApiError>`（kind=`"api"`）、`From<PipelineError>`（按变体分发）、`From<anyhow::Error>`（kind=`"internal"`）
+- 实现 `From<ChatError>`（kind=`"validation"`）、`From<DbError>`（kind=`"db"`）、`From<ApiError>`（kind=`"api"`）、`From<CommandError>`（按变体分发）、`From<anyhow::Error>`（kind=`"internal"`）
 - 所有 Tauri 命令返回 `Result<T, AppError>`，前端通过 `getErrorMessage(e)` 提取消息
 
 **前端错误处理：**
@@ -401,7 +528,7 @@ function getErrorMessage(e: any): string {
 **错误 Display 格式：** 所有错误类型的 `Display` 实现必须说明错误**类别**和**说明**，不得简单转发底层错误。具体规则：
 
 - **底层错误**（`ChatError`、`DbError`、`ApiError`）：每条 `#[error("...")]` 消息以自然语言描述错误，包含上下文信息（如错误的会话 ID、原因等）。内部已自带前缀（如 `ApiError` 的 `"API ..."`、`DbError::Sql` 的 `"SQL error: "`）。
-- **组合错误**（`PipelineError`）：使用 `[Category] description` 格式，类别必须有实际意义，能够直观反映错误来源。通过 `#[error("[Category] {0}")]` 在转发时添加类型前缀。
+- **组合错误**（`CommandError`）：使用 `[Category] description` 格式，类别必须有实际意义，能够直观反映错误来源。通过 `#[error("[Category] {0}")]` 在转发时添加类型前缀。
 - **接口错误**（`AppError`）：`Display` 输出 `[kind] message`，`kind` 字段作为类别标识。
 
 示例 Display 输出：
@@ -418,10 +545,11 @@ function getErrorMessage(e: any): string {
 **错误流转链路（send_message 示例）：**
 
 ```
-[DeepSeek API] ApiError ──┐
-[SQLite]      DbError  ──┼── PipelineError ──→ AppError ──→ [Frontend] getErrorMessage(e)
-[Chat]  ChatError ─────┘        ↑                    ↑
-                            ? 自动转换          From 逐变体分发
+[DeepSeek API] ApiError ─────┐
+[SQLite]      DbError  ─────┤
+[Chat]  ChatError ──────────┼── CommandError ──→ AppError ──→ [Frontend] getErrorMessage(e)
+[Knowledge] KnowledgeError ─┘        ↑                    ↑
+                                ? 自动转换          From 逐变体分发
 ```
 
 ### 数据流
@@ -429,7 +557,7 @@ function getErrorMessage(e: any): string {
 ```
 [UI] invoke("send_message", {session_id, content})
          ↓
-[Tauri Command] → pipeline.chat() → tokio::spawn
+[Tauri Command] → service.chat() → tokio::spawn
          ↓                              ↓
 [mpsc stream] ← DeepSeek SSE       emit("chat-chunk")
          ↓                              ↓
@@ -438,6 +566,25 @@ function getErrorMessage(e: any): string {
 [DB] append_chat_turn()
          ↓
 emit("chat-done")
+         ↓
+[SyncEngine] handle_new_turn() → TurnBroadcast(gossip)
+```
+
+**知识库检索数据流：**
+
+```
+[UI] invoke("search_knowledge_base", {kb_id, query})
+         ↓
+[Tauri Command] → KnowledgeService.hybrid_search()
+         ↓
+[Embed] embed(query) → 查询向量
+         ↓
+├── [EdgeVectorStore] 向量相似度搜索
+├── [BM25Index] 关键词检索
+        ↓
+[RRF] rrf_fuse(vector_results, bm25_results) → top-K 块
+        ↓
+[UI] 显示搜索结果
 ```
 
 ### 安全
@@ -456,11 +603,13 @@ emit("chat-done")
 集成测试在 `crates/chat_pm_service/src/tests.rs` 中 — 集成测试（`demo`）：
 
 1. 从 `.env` 加载 `DEEPSEEK_API_KEY`
-2. 创建 `ChatDb::open_in_memory()` + `ChatPipeline`
+2. 创建 `ChatDb::open_in_memory()` + `ChatService`
 3. 运行多轮对话
 4. 模拟跨"HTTP 请求"的会话恢复
 
-运行：`cargo test --package chat_pm_service`
+知识库单元测试在 `chat_pm_knowledge` crate 中（chunk、BM25、RRF、搜索等）。
+
+运行：`cargo test --package chat_pm_service`、`cargo test --package chat_pm_knowledge`
 
 ### 前端
 
@@ -636,30 +785,6 @@ iroh (P2P 直连传输层)
 
 ### Tauri 集成
 
-#### AppState
-
-```rust
-struct AppState {
-    db: Arc<Mutex<ChatDb>>,
-    db_path: PathBuf,
-    service: Mutex<Option<ChatService>>,
-    sync_engine: Mutex<Option<SyncEngine>>,
-    device_id: DeviceId,
-}
-```
-
-设备身份在启动时通过 `load_or_create_identity()` 初始化：从 `config` 表读取 `device_secret_key`，派生 `DeviceId`；首次启动时生成随机 ed25519 密钥并持久化。
-
-#### 同步 Tauri 命令
-
-| 命令 | 输入 | 输出 | 说明 |
-|------|------|------|------|
-| `get_sync_status` | — | `SyncStatusPayload` | 查询同步状态 |
-| `init_and_create_sync_doc` | — | `String`（ticket） | 发起者：创建同步链 |
-| `join_sync_doc` | `ticket: String` | `()` | 加入者：凭 ticket 加入 |
-| `stop_sync` | — | `()` | 停止同步 |
-| `publish_sync_announcement` | — | `()` | 手动触发全量广播 |
-
 #### `send_message` 与同步的集成
 
 `send_message` 完成后自动调用 `engine.handle_new_turn()`，将新轮次注入状态机触发 `TurnBroadcast` 实时广播：
@@ -684,6 +809,9 @@ if let Some(ref engine) = *engine_guard {
 | 事件 | payload | 说明 |
 |------|---------|------|
 | `sync-status-changed` | `{ status, active, ticket }` | 同步状态变化 |
+| `session-title-updated` | `{ session_id, title }` | 标题生成或手动编辑 |
+| `session-deleted` | `{ session_id }` | 会话被删除 |
+| `data-cleared` | — | 所有数据被清除 |
 
 ### 数据流
 
@@ -723,18 +851,22 @@ dispatch(BroadcastGossip(TurnBroadcast))
 - 通过 `rusqlite`（`chat_pm_database`）实现 SQLite 存储 — WAL 模式、bundled
 - DeepSeek 流式客户端（`chat_pm_deepseek`）
 - 带会话生命周期的聊天管道（`chat_pm_service`）
+- **本地知识库引擎**（`chat_pm_knowledge`）— 文档分块、ONNX 向量嵌入、BM25 关键词检索、RRF 混合检索
+- **知识库服务**（`KnowledgeService`）— 编排嵌入/向量存储/BM25 索引/数据库元数据
 - 基于事件流式传输的 Tauri 命令（`src-tauri`）
-- 聊天 UI，含会话列表、标题显示、流式传输、API key 配置（SvelteKit）
-- **同步协议状态机**（`chat_pm_sync`）— `SyncMachine<S>` 类型状态机、`InEvent`/`OutEvent` 事件驱动、`GossipMessage` 三层消息体系、乱序检测（`BTreeSet` + `contiguous`）
+- 聊天 UI，含会话列表、标题显示、流式传输、API key 配置、模型切换、知识库管理（SvelteKit）
+- **P2P 同步协议状态机**（`chat_pm_sync`）— `SyncMachine<S>` 类型状态机、`InEvent`/`OutEvent` 事件驱动、`GossipMessage` 三层消息体系、乱序检测（`BTreeSet` + `contiguous`）
 - **同步引擎**（`chat_pm_service`）— `SyncEngine` I/O 容器、`poll_timeout()` 驱动事件循环、`TurnBroadcast` 实时广播 + P2P 直连补传、`handle_new_turn()` / `handle_neighbor_up()` API
 - **设备身份** — `DeviceId` = ed25519 公钥，从 `device_secret_key` 派生，与 `EndpointId` 不可失败互转
 - **数据库同步方法** — `build_watermarks()`、`get_session_snapshot()`、`get_turns_from()`、`upsert_turn()`、`upsert_session()`、`apply_verified_payload()`
-- **Tauri 同步命令** — `get_sync_status`、`init_and_create_sync_doc`、`join_sync_doc`、`stop_sync`、`publish_sync_announcement`
+- **会话与知识库关联** — `set_session_kb_refs` / `get_session_kb_refs`，会话可引用知识库作为上下文
 - **`send_message` 自动触发同步** — 轮次完成后自动 `handle_new_turn()`
+- **会话删除与数据清除** — `delete_session`、`clear_all_data`
+- **模型切换** — UI 动态切换对话模型
 
 **尚未实现：**
 
-- 长对话自动摘要压缩
-- 多模型支持
+- 长对话自动摘要压缩（已设计 summary/summarization 类型，待集成到管道）
 - 对话导入/导出
 - 自定义系统提示词
+- 端到端加密同步
