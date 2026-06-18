@@ -4,11 +4,13 @@
     sending = false,
     onInputTextChange = (_val: string) => {},
     onSend = () => {},
+    children,
   }: {
     inputText: string;
     sending: boolean;
     onInputTextChange: (val: string) => void;
     onSend: () => void;
+    children?: import("svelte").Snippet;
   } = $props();
 
   let textareaEl: HTMLTextAreaElement;
@@ -39,6 +41,8 @@
     onInputTextChange((e.target as HTMLTextAreaElement).value);
   }
 </script>
+
+{@render children?.()}
 
 <div class="input-bar">
   <div class="input-wrapper">

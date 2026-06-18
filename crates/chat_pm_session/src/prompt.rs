@@ -32,10 +32,27 @@ impl SystemPrompt {
     }
 }
 
+/// 从知识库检索到的上下文片段。
+#[derive(Debug, Clone)]
+pub struct KnowledgeChunk {
+    pub content: String,
+    pub document_title: String,
+    pub score: f32,
+}
+
+/// 单个知识库的检索结果。
+#[derive(Debug, Clone)]
+pub struct KnowledgeContext {
+    pub kb_name: String,
+    pub chunks: Vec<KnowledgeChunk>,
+}
+
 #[derive(Debug, Clone)]
 pub struct Context {
     pub summary: Option<Summary>,
     pub recent_memory: Vec<Memory>,
+    /// 从知识库检索到的上下文。
+    pub knowledge: Vec<KnowledgeContext>,
 }
 
 #[derive(Debug, Clone)]
@@ -54,6 +71,24 @@ impl PromptComposer {
         } else {
             vec![]
         };
+
+        // 注入知识库上下文（在系统提示词之后、摘要/记忆之前）
+        if !ctx.knowledge.is_empty() {
+            let mut kb_text = String::from(
+                "以下是从知识库中检索到的相关信息，请参考这些内容来回答问题：\n\n",
+            );
+            for kc in &ctx.knowledge {
+                kb_text.push_str(&format!("## 知识库「{}」中的相关内容：\n", kc.kb_name));
+                for chunk in &kc.chunks {
+                    kb_text.push_str(&format!(
+                        "【来源：{}，相关度：{:.2}】\n{}\n\n",
+                        chunk.document_title, chunk.score, chunk.content
+                    ));
+                }
+            }
+            messages.push(ChatMessage::system(kb_text));
+        }
+
         if let Some(summary) = ctx.summary {
             messages.push(ChatMessage::system(format!("Summary: {}", summary.content)));
         }

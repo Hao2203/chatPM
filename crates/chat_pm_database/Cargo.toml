@@ -6,6 +6,7 @@ edition = "2024"
 [dependencies]
 chat_pm_session = { workspace = true }
 chat_pm_sync = { workspace = true }
+chat_pm_knowledge = { workspace = true }
 chrono = { workspace = true }
 rusqlite = { workspace = true }
 serde = { workspace = true }

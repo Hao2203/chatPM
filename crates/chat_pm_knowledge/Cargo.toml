@@ -1,0 +1,25 @@
+[package]
+name = "chat_pm_knowledge"
+version = "0.1.0"
+edition = "2024"
+
+[features]
+default = []
+# 未来启用: qdrant-edge 向量存储
+qdrant = []
+# 未来启用: ONNX 本地嵌入模型
+onnx = ["dep:ort", "dep:tokenizers"]
+
+[dependencies]
+chat_pm_session = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+uuid = { workspace = true }
+
+# 可选: qdrant-edge 向量数据库 (暂时禁用，网络不可用)
+# qdrant-edge = { version = "0.6", optional = true }
+
+# 可选: ONNX 嵌入模型
+ort = { version = "2.0.0-rc.12", optional = true }
+tokenizers = { version = "0.21", optional = true }

@@ -9,6 +9,7 @@ chat_pm_session = { workspace = true }
 chat_pm_database = { workspace = true }
 chat_pm_deepseek = { workspace = true }
 chat_pm_sync = { workspace = true }
+chat_pm_knowledge = { workspace = true }
 thiserror = { workspace = true }
 chrono = { workspace = true }
 distributed-topic-tracker = { workspace = true }

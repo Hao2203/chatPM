@@ -51,3 +51,33 @@ pub(crate) struct SyncStatusPayload {
     pub(crate) active: bool,
     pub(crate) ticket: Option<String>,
 }
+
+// ── 知识库负载 ──────────────────────────────────────────────────────
+
+#[derive(Debug, Clone, Serialize)]
+pub(crate) struct KbInfo {
+    pub(crate) kb_id: String,
+    pub(crate) name: String,
+    pub(crate) created_at: String,
+    pub(crate) document_count: usize,
+    pub(crate) total_chunks: usize,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub(crate) struct KbDocInfo {
+    pub(crate) doc_id: String,
+    pub(crate) kb_id: String,
+    pub(crate) title: String,
+    pub(crate) chunk_count: usize,
+    pub(crate) char_count: usize,
+    pub(crate) created_at: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub(crate) struct KbSearchResult {
+    pub(crate) chunk_id: String,
+    pub(crate) document_id: String,
+    pub(crate) chunk_index: usize,
+    pub(crate) content: String,
+    pub(crate) score: f32,
+}

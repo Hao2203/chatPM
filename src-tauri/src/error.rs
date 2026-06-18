@@ -2,6 +2,7 @@ use chat_pm_service::session::CommandError;
 use chat_pm_service::sync_engine::SyncEngineError;
 use chat_pm_database::DbError;
 use chat_pm_deepseek::ApiError;
+use chat_pm_knowledge::KnowledgeError;
 use chat_pm_session::ChatError;
 use chat_pm_sync::{SyncError, SyncTicketError};
 use serde::Serialize;
@@ -19,6 +20,8 @@ pub enum ErrorKind {
     Locked,
     #[serde(rename = "internal")]
     Internal,
+    #[serde(rename = "knowledge")]
+    Knowledge,
 }
 
 impl std::fmt::Display for ErrorKind {
@@ -29,6 +32,7 @@ impl std::fmt::Display for ErrorKind {
             Self::Validation => write!(f, "validation"),
             Self::Locked => write!(f, "locked"),
             Self::Internal => write!(f, "internal"),
+            Self::Knowledge => write!(f, "knowledge"),
         }
     }
 }
@@ -131,12 +135,23 @@ impl From<anyhow::Error> for AppError {
     }
 }
 
+impl From<KnowledgeError> for AppError {
+    fn from(e: KnowledgeError) -> Self {
+        Self {
+            kind: ErrorKind::Knowledge,
+            message: e.to_string(),
+            source: Some(e.into()),
+        }
+    }
+}
+
 impl From<CommandError> for AppError {
     fn from(e: CommandError) -> Self {
         match e {
             CommandError::Chat(d) => d.into(),
             CommandError::Db(d) => d.into(),
             CommandError::Api(a) => a.into(),
+            CommandError::Knowledge(k) => k.into(),
             CommandError::Internal(a) => a.into(),
         }
     }

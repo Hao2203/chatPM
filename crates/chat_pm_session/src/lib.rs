@@ -9,5 +9,5 @@ pub mod summarization;
 
 pub use chat::{Role, TurnId};
 pub use error::ChatError;
-pub use prompt::{SummaryPrompt, TitlePrompt};
+pub use prompt::{Context, KnowledgeChunk, KnowledgeContext, PromptComposer, SummaryPrompt, SystemPrompt, TitlePrompt};
 pub use session::{NewSession, Session, SessionId, Title};

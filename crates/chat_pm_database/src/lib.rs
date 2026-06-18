@@ -1,5 +1,6 @@
 use std::{
     path::Path,
+    str::FromStr,
     sync::{Arc, Mutex},
 };
 
@@ -7,6 +8,7 @@ use chrono::{DateTime, Utc};
 use rusqlite::{Connection, params};
 use serde::{Deserialize, Serialize};
 
+use chat_pm_knowledge::KnowledgeBaseId;
 use chat_pm_session::{chat::TurnId, memory::Memory, session::SessionId};
 use chat_pm_sync::{DeviceId, SessionSnapshot, SessionWatermark, TurnSnapshot, VerifiedPayload};
 use uuid::Uuid;
@@ -72,6 +74,34 @@ ALTER TABLE turns ADD COLUMN local_seq_no INTEGER NOT NULL DEFAULT 0;
 ALTER TABLE turns ADD COLUMN device_id BLOB;
 ";
 
+const MIGRATE_V4_SQL: &str = "
+CREATE TABLE IF NOT EXISTS knowledge_bases (
+    kb_id          TEXT PRIMARY KEY,
+    name           TEXT NOT NULL UNIQUE,
+    created_at     INTEGER NOT NULL,
+    document_count INTEGER NOT NULL DEFAULT 0,
+    total_chunks   INTEGER NOT NULL DEFAULT 0
+);
+
+CREATE TABLE IF NOT EXISTS kb_documents (
+    doc_id      TEXT PRIMARY KEY,
+    kb_id       TEXT NOT NULL,
+    title       TEXT NOT NULL,
+    chunk_count INTEGER NOT NULL DEFAULT 0,
+    char_count  INTEGER NOT NULL DEFAULT 0,
+    created_at  INTEGER NOT NULL,
+    FOREIGN KEY (kb_id) REFERENCES knowledge_bases(kb_id) ON DELETE CASCADE
+);
+
+CREATE TABLE IF NOT EXISTS session_kb_refs (
+    session_id TEXT NOT NULL,
+    kb_id      TEXT NOT NULL,
+    PRIMARY KEY (session_id, kb_id),
+    FOREIGN KEY (session_id) REFERENCES sessions(session_id) ON DELETE CASCADE,
+    FOREIGN KEY (kb_id) REFERENCES knowledge_bases(kb_id) ON DELETE CASCADE
+);
+";
+
 // ── Domain records ──────────────────────────────────────────────────
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -107,6 +137,27 @@ pub struct TurnRecord {
 pub struct DbStats {
     pub session_count: usize,
     pub total_turn_count: usize,
+}
+
+/// 资料库的数据库记录。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct KbRecord {
+    pub kb_id: KnowledgeBaseId,
+    pub name: String,
+    pub created_at: DateTime<Utc>,
+    pub document_count: usize,
+    pub total_chunks: usize,
+}
+
+/// 知识库中文档的数据库记录。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DocRecord {
+    pub doc_id: String,
+    pub kb_id: KnowledgeBaseId,
+    pub title: String,
+    pub chunk_count: usize,
+    pub char_count: usize,
+    pub created_at: DateTime<Utc>,
 }
 
 // ── Error type ─────────────────────────────────────────────────────
@@ -145,6 +196,7 @@ impl ChatDb {
         let _ = conn.execute_batch(MIGRATE_V1_SQL);
         let _ = conn.execute_batch(MIGRATE_V2_SQL);
         let _ = conn.execute_batch(MIGRATE_V3_SQL);
+        let _ = conn.execute_batch(MIGRATE_V4_SQL);
         Ok(Self {
             conn: Arc::new(Mutex::new(conn)),
         })
@@ -157,6 +209,7 @@ impl ChatDb {
         let _ = conn.execute_batch(MIGRATE_V1_SQL);
         let _ = conn.execute_batch(MIGRATE_V2_SQL);
         let _ = conn.execute_batch(MIGRATE_V3_SQL);
+        let _ = conn.execute_batch(MIGRATE_V4_SQL);
         Ok(Self {
             conn: Arc::new(Mutex::new(conn)),
         })
@@ -710,6 +763,214 @@ impl ChatDb {
             session_count,
             total_turn_count,
         })
+    }
+
+    // ── Knowledge Bases ───────────────────────────────────────────
+
+    pub fn create_knowledge_base(&self, kb_id: KnowledgeBaseId, name: &str) -> DbResult<()> {
+        let conn = self.lock_conn()?;
+        conn.prepare_cached(
+            "INSERT INTO knowledge_bases (kb_id, name, created_at, document_count, total_chunks)
+             VALUES (?1, ?2, ?3, 0, 0)",
+        )?
+        .execute(params![
+            kb_id.to_string(),
+            name,
+            Utc::now().timestamp(),
+        ])?;
+        Ok(())
+    }
+
+    pub fn get_knowledge_base(&self, kb_id: KnowledgeBaseId) -> DbResult<Option<KbRecord>> {
+        let conn = self.lock_conn()?;
+        conn.prepare_cached(
+            "SELECT kb_id, name, created_at, document_count, total_chunks
+             FROM knowledge_bases WHERE kb_id = ?1",
+        )?
+        .query_row(params![kb_id.to_string()], |row| {
+            Ok(KbRecord {
+                kb_id: KnowledgeBaseId::from_uuid(
+                    Uuid::parse_str(&row.get::<_, String>(0)?).unwrap_or_default(),
+                ),
+                name: row.get(1)?,
+                created_at: from_sql_timestamp(row.get(2)?)?,
+                document_count: row.get::<_, usize>(3)?,
+                total_chunks: row.get::<_, usize>(4)?,
+            })
+        })
+        .optional()
+        .map_err(DbError::Sql)
+    }
+
+    pub fn list_knowledge_bases(&self) -> DbResult<Vec<KbRecord>> {
+        let conn = self.lock_conn()?;
+        let mut stmt = conn.prepare_cached(
+            "SELECT kb_id, name, created_at, document_count, total_chunks
+             FROM knowledge_bases ORDER BY created_at DESC",
+        )?;
+        let rows = stmt.query_map([], |row| {
+            Ok(KbRecord {
+                kb_id: KnowledgeBaseId::from_uuid(
+                    Uuid::parse_str(&row.get::<_, String>(0)?).unwrap_or_default(),
+                ),
+                name: row.get(1)?,
+                created_at: from_sql_timestamp(row.get(2)?)?,
+                document_count: row.get::<_, usize>(3)?,
+                total_chunks: row.get::<_, usize>(4)?,
+            })
+        })?;
+        rows.collect::<Result<Vec<_>, _>>()
+            .map_err(|e| DbError::Sql(e))
+    }
+
+    pub fn rename_knowledge_base(&self, kb_id: KnowledgeBaseId, new_name: &str) -> DbResult<()> {
+        let conn = self.lock_conn()?;
+        let rows = conn
+            .prepare_cached("UPDATE knowledge_bases SET name = ?1 WHERE kb_id = ?2")?
+            .execute(params![new_name, kb_id.to_string()])?;
+        if rows == 0 {
+            return Err(DbError::Sql(rusqlite::Error::QueryReturnedNoRows));
+        }
+        Ok(())
+    }
+
+    pub fn delete_knowledge_base(&self, kb_id: KnowledgeBaseId) -> DbResult<bool> {
+        let conn = self.lock_conn()?;
+        conn.execute_batch("BEGIN")?;
+        // 级联删除文档和会话引用
+        conn.prepare_cached("DELETE FROM session_kb_refs WHERE kb_id = ?1")?
+            .execute(params![kb_id.to_string()])?;
+        conn.prepare_cached("DELETE FROM kb_documents WHERE kb_id = ?1")?
+            .execute(params![kb_id.to_string()])?;
+        let rows = conn
+            .prepare_cached("DELETE FROM knowledge_bases WHERE kb_id = ?1")?
+            .execute(params![kb_id.to_string()])?;
+        conn.execute_batch("COMMIT")?;
+        Ok(rows > 0)
+    }
+
+    pub fn update_kb_stats(
+        &self,
+        kb_id: KnowledgeBaseId,
+        doc_count: usize,
+        chunk_count: usize,
+    ) -> DbResult<()> {
+        let conn = self.lock_conn()?;
+        conn.prepare_cached(
+            "UPDATE knowledge_bases SET document_count = ?1, total_chunks = ?2 WHERE kb_id = ?3",
+        )?
+        .execute(params![doc_count, chunk_count, kb_id.to_string()])?;
+        Ok(())
+    }
+
+    // ── KB Documents ──────────────────────────────────────────────
+
+    pub fn add_document(&self, doc: &DocRecord) -> DbResult<()> {
+        let conn = self.lock_conn()?;
+        conn.prepare_cached(
+            "INSERT INTO kb_documents (doc_id, kb_id, title, chunk_count, char_count, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+        )?
+        .execute(params![
+            doc.doc_id,
+            doc.kb_id.to_string(),
+            doc.title,
+            doc.chunk_count,
+            doc.char_count,
+            doc.created_at.timestamp(),
+        ])?;
+        Ok(())
+    }
+
+    pub fn list_documents(&self, kb_id: KnowledgeBaseId) -> DbResult<Vec<DocRecord>> {
+        let conn = self.lock_conn()?;
+        let mut stmt = conn.prepare_cached(
+            "SELECT doc_id, kb_id, title, chunk_count, char_count, created_at
+             FROM kb_documents WHERE kb_id = ?1 ORDER BY created_at DESC",
+        )?;
+        let rows = stmt.query_map(params![kb_id.to_string()], |row| {
+            Ok(DocRecord {
+                doc_id: row.get(0)?,
+                kb_id: KnowledgeBaseId::from_uuid(
+                    Uuid::parse_str(&row.get::<_, String>(1)?).unwrap_or_default(),
+                ),
+                title: row.get(2)?,
+                chunk_count: row.get::<_, usize>(3)?,
+                char_count: row.get::<_, usize>(4)?,
+                created_at: from_sql_timestamp(row.get(5)?)?,
+            })
+        })?;
+        rows.collect::<Result<Vec<_>, _>>()
+            .map_err(|e| DbError::Sql(e))
+    }
+
+    pub fn delete_document(&self, kb_id: KnowledgeBaseId, doc_id: &str) -> DbResult<bool> {
+        let conn = self.lock_conn()?;
+        let rows = conn
+            .prepare_cached("DELETE FROM kb_documents WHERE doc_id = ?1 AND kb_id = ?2")?
+            .execute(params![doc_id, kb_id.to_string()])?;
+        Ok(rows > 0)
+    }
+
+    pub fn get_document(&self, kb_id: KnowledgeBaseId, doc_id: &str) -> DbResult<Option<DocRecord>> {
+        let conn = self.lock_conn()?;
+        conn.prepare_cached(
+            "SELECT doc_id, kb_id, title, chunk_count, char_count, created_at
+             FROM kb_documents WHERE doc_id = ?1 AND kb_id = ?2",
+        )?
+        .query_row(params![doc_id, kb_id.to_string()], |row| {
+            Ok(DocRecord {
+                doc_id: row.get(0)?,
+                kb_id: KnowledgeBaseId::from_uuid(
+                    Uuid::parse_str(&row.get::<_, String>(1)?).unwrap_or_default(),
+                ),
+                title: row.get(2)?,
+                chunk_count: row.get::<_, usize>(3)?,
+                char_count: row.get::<_, usize>(4)?,
+                created_at: from_sql_timestamp(row.get(5)?)?,
+            })
+        })
+        .optional()
+        .map_err(DbError::Sql)
+    }
+
+    // ── Session-KB References ─────────────────────────────────────
+
+    pub fn set_session_kb_refs(
+        &self,
+        session_id: SessionId,
+        kb_ids: &[KnowledgeBaseId],
+    ) -> DbResult<()> {
+        let conn = self.lock_conn()?;
+        conn.execute_batch("BEGIN")?;
+        // 清除旧引用
+        conn.prepare_cached("DELETE FROM session_kb_refs WHERE session_id = ?1")?
+            .execute(params![session_id.to_string()])?;
+        // 插入新引用
+        let mut stmt = conn
+            .prepare_cached("INSERT INTO session_kb_refs (session_id, kb_id) VALUES (?1, ?2)")?;
+        for kb_id in kb_ids {
+            stmt.execute(params![session_id.to_string(), kb_id.to_string()])?;
+        }
+        conn.execute_batch("COMMIT")?;
+        Ok(())
+    }
+
+    pub fn get_session_kb_refs(&self, session_id: SessionId) -> DbResult<Vec<KnowledgeBaseId>> {
+        let conn = self.lock_conn()?;
+        let mut stmt = conn.prepare_cached(
+            "SELECT kb_id FROM session_kb_refs WHERE session_id = ?1",
+        )?;
+        let rows = stmt.query_map(params![session_id.to_string()], |row| {
+            Ok(row.get::<_, String>(0)?)
+        })?;
+        rows.collect::<Result<Vec<_>, _>>()
+            .map(|ids| {
+                ids.into_iter()
+                    .filter_map(|s| KnowledgeBaseId::from_str(&s).ok())
+                    .collect()
+            })
+            .map_err(|e| DbError::Sql(e))
     }
 }
 

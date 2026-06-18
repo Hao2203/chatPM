@@ -1,11 +1,16 @@
 use anyhow::Result as AnyhowResult;
+use std::sync::Arc;
+
 use chat_pm_database::{ChatDb, DbError};
 use chat_pm_deepseek::{
     ApiError, ChatRequestConfig, Client as DeepseekClient, DeepSeekModel, ReasoningEffort,
 };
+use chat_pm_knowledge::KnowledgeError;
 use chat_pm_sync::DeviceId;
 use tokio::sync::mpsc;
-use tracing::{debug, info};
+use tracing::{debug, info, warn};
+
+use crate::knowledge::KnowledgeService;
 
 use chat_pm_session::{
     ChatError,
@@ -28,6 +33,8 @@ pub enum CommandError {
     Db(#[from] DbError),
     #[error("[API Error] {0}")]
     Api(#[from] ApiError),
+    #[error("[Knowledge Error] {0}")]
+    Knowledge(#[from] KnowledgeError),
     #[error("[Internal Error] {0}")]
     Internal(#[from] anyhow::Error),
 }
@@ -45,6 +52,8 @@ pub struct ChatConfig {
     pub thinking_enabled: bool,
     pub reasoning_effort: Option<ReasoningEffort>,
     pub device_id: DeviceId,
+    /// 从知识库检索的最大块数。
+    pub knowledge_top_k: usize,
 }
 
 impl ChatConfig {
@@ -94,6 +103,7 @@ impl Default for ChatConfig {
             thinking_enabled: false,
             reasoning_effort: None,
             device_id: DeviceId::generate(),
+            knowledge_top_k: 5,
         }
     }
 }
@@ -127,6 +137,7 @@ pub struct ChatService {
     client: DeepseekClient,
     db: ChatDb,
     config: ChatConfig,
+    knowledge_service: Option<Arc<KnowledgeService>>,
 }
 
 impl ChatService {
@@ -136,12 +147,17 @@ impl ChatService {
         config: ChatConfig,
     ) -> Result<Self, CommandError> {
         config.validate()?;
-        Ok(Self { client, db, config })
+        Ok(Self { client, db, config, knowledge_service: None })
     }
 
     pub fn with_default_deepseek(db: ChatDb, config: ChatConfig) -> Result<Self, CommandError> {
         let client = DeepseekClient::from_env()?;
         Self::new(db, client, config)
+    }
+
+    /// 设置知识库服务。
+    pub fn set_knowledge_service(&mut self, ks: Arc<KnowledgeService>) {
+        self.knowledge_service = Some(ks);
     }
 
     // ── Lifecycle: NewSession ───────────────────────────────────────
@@ -230,9 +246,29 @@ impl ChatService {
             ..SystemPrompt::default()
         };
 
+        // 检索知识库上下文
+        let knowledge = if let Some(ref ks) = self.knowledge_service {
+            match ks
+                .retrieve_context(session.session_id(), user_input.as_str(), self.config.knowledge_top_k)
+                .await
+            {
+                Ok(results) => {
+                    debug!(results = results.len(), "知识库检索完成");
+                    group_search_results_by_kb(results)
+                }
+                Err(e) => {
+                    warn!(error = %e, "知识库检索失败，继续对话");
+                    vec![]
+                }
+            }
+        } else {
+            vec![]
+        };
+
         let ctx = Context {
             summary,
             recent_memory,
+            knowledge,
         };
         let composer = PromptComposer::new(system_prompt);
         let messages = composer.compose_prompt(ctx, &user_input);
@@ -334,6 +370,33 @@ impl ChatService {
     pub async fn summarize_session(&self, session_id: SessionId) -> Result<(), CommandError> {
         summarize_session_inner(&self.db, &self.client, &self.config, session_id).await
     }
+}
+
+// ── Helpers ──────────────────────────────────────────────────────────
+
+/// 将搜索结果按文档标题分组为 `KnowledgeContext` 列表。
+fn group_search_results_by_kb(
+    results: Vec<chat_pm_knowledge::SearchResult>,
+) -> Vec<chat_pm_session::prompt::KnowledgeContext> {
+    use std::collections::HashMap;
+    let mut groups: HashMap<String, Vec<chat_pm_session::prompt::KnowledgeChunk>> = HashMap::new();
+
+    for r in results {
+        let entry = groups.entry(r.document_id.clone()).or_default();
+        entry.push(chat_pm_session::prompt::KnowledgeChunk {
+            content: r.content,
+            document_title: r.document_id.clone(),
+            score: r.score,
+        });
+    }
+
+    groups
+        .into_iter()
+        .map(|(title, chunks)| chat_pm_session::prompt::KnowledgeContext {
+            kb_name: title,
+            chunks,
+        })
+        .collect()
 }
 
 // ── Standalone summarization function (usable inside tokio::spawn) ─────

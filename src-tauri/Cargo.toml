@@ -27,9 +27,11 @@ chat_pm_database = { workspace = true }
 chat_pm_service = { workspace = true }
 chat_pm_deepseek = { workspace = true }
 chat_pm_sync = { workspace = true }
+chat_pm_knowledge = { workspace = true }
+chrono = { workspace = true }
+uuid = { workspace = true }
 tokio = { workspace = true }
 anyhow = { workspace = true }
 tracing = { workspace = true }
-uuid = { workspace = true }
 tauri-plugin-log = "2"
 

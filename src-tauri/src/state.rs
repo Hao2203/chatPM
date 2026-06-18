@@ -1,3 +1,4 @@
+use chat_pm_service::knowledge::KnowledgeService;
 use chat_pm_service::session::ChatService;
 use chat_pm_service::sync_engine::SyncEngine;
 use chat_pm_database::ChatDb;
@@ -12,4 +13,6 @@ pub(crate) struct AppState {
     pub(crate) service: Mutex<Option<ChatService>>,
     pub(crate) sync_engine: Mutex<Option<SyncEngine>>,
     pub(crate) device_id: DeviceId,
+    pub(crate) knowledge_service: Mutex<Option<Arc<KnowledgeService>>>,
+    pub(crate) knowledge_stores_dir: PathBuf,
 }

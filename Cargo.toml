@@ -5,6 +5,7 @@ members = [
     "crates/chat_pm_database",
     "crates/chat_pm_deepseek",
     "crates/chat_pm_sync",
+    "crates/chat_pm_knowledge",
     "src-tauri"
 ]
 resolver = "2" # Tauri 2.x 需要 resolver = "2"
@@ -21,6 +22,7 @@ chat_pm_database = { path = "crates/chat_pm_database" }
 chat_pm_deepseek = { path = "crates/chat_pm_deepseek" }
 chat_pm_service = { path = "crates/chat_pm_service" }
 chat_pm_sync = { path = "crates/chat_pm_sync" }
+chat_pm_knowledge = { path = "crates/chat_pm_knowledge" }
 chrono = { version = "0.4", features = ["serde"] }
 derive_more = { version = "2", features = ["from", "into", "as_ref"] }
 distributed-topic-tracker = "0.3"

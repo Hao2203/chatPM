@@ -6,6 +6,8 @@
   import ChatInput from "$lib/components/ChatInput.svelte";
   import SettingsModal from "$lib/components/SettingsModal.svelte";
   import ConfirmDialog from "$lib/components/ConfirmDialog.svelte";
+  import KbSelector from "$lib/components/KbSelector.svelte";
+  import KbManageModal from "$lib/components/KbManageModal.svelte";
 
   // ── Types ──────────────────────────────────────────────────
   interface Message {
@@ -58,6 +60,46 @@
 
   // Per-chat draft storage
   let drafts = $state<Record<string, string>>({});
+
+  // ── Knowledge Base state ─────────────────────────────────────
+  interface KbInfo {
+    kb_id: string;
+    name: string;
+    created_at: string;
+    document_count: number;
+    total_chunks: number;
+  }
+  let knowledgeBases = $state<KbInfo[]>([]);
+  let activeKbIds = $state<string[]>([]);
+  let showKbManager = $state(false);
+
+  async function loadKnowledgeBases() {
+    try {
+      knowledgeBases = await invoke<KbInfo[]>("list_knowledge_bases");
+    } catch (_) {
+      // Knowledge service may not be initialized
+    }
+  }
+
+  async function loadSessionKbRefs(sid: string) {
+    try {
+      activeKbIds = await invoke<string[]>("get_session_kb_refs", { sessionId: sid });
+    } catch (_) {
+      activeKbIds = [];
+    }
+  }
+
+  async function toggleKbRef(kbId: string) {
+    const newIds = activeKbIds.includes(kbId)
+      ? activeKbIds.filter(id => id !== kbId)
+      : [...activeKbIds, kbId];
+    activeKbIds = newIds;
+    if (activeSessionId) {
+      try {
+        await invoke("set_session_kb_refs", { sessionId: activeSessionId, kbIds: newIds });
+      } catch (_) {}
+    }
+  }
 
   // ── Event cleanup ──────────────────────────────────────────
   let unlistenChunk: UnlistenFn | null = null;
@@ -124,6 +166,7 @@
     messages = [];
     messageId = 0;
     contextTokens = 0;
+    activeKbIds = [];
     loadDraft(null);
   }
 
@@ -133,6 +176,7 @@
     activeSessionId = sid;
     pendingNewChat = false;
     loadDraft(sid);
+    loadSessionKbRefs(sid);
 
     const turns = await invoke<
       {
@@ -341,6 +385,7 @@
       model = m;
     });
     loadSessions();
+    loadKnowledgeBases();
 
     // Check sync status
     invoke<{ status: string; active: boolean; ticket: string | null }>("get_sync_status").then(
@@ -591,11 +636,32 @@
         {sending}
         onInputTextChange={(val: string) => (inputText = val)}
         onSend={sendMessage}
-      />
+      >
+        {#snippet children()}
+          <KbSelector
+            activeKbs={knowledgeBases.filter(k => activeKbIds.includes(k.kb_id))}
+            allKbs={knowledgeBases}
+            onToggle={toggleKbRef}
+          />
+        {/snippet}
+      </ChatInput>
 
     {/if}
   </div>
 </div>
+
+<!-- KB management button in sidebar area -->
+<button class="kb-manage-fab" onclick={() => showKbManager = true} title="管理资料库">
+  <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+    <path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20"></path>
+    <path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z"></path>
+  </svg>
+</button>
+
+<KbManageModal
+  show={showKbManager}
+  onClose={() => { showKbManager = false; loadKnowledgeBases(); }}
+/>
 
 <SettingsModal
   show={showSettings}
@@ -1032,5 +1098,33 @@
     font-family: var(--font-mono);
     color: var(--text-primary);
     font-weight: 500;
+  }
+
+  .kb-manage-fab {
+    position: fixed;
+    bottom: 100px;
+    right: 24px;
+    width: 40px;
+    height: 40px;
+    border: 1px solid var(--border-color);
+    border-radius: 50%;
+    background: var(--bg-sidebar);
+    color: var(--text-muted);
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    box-shadow: 0 2px 8px rgba(0, 0, 0, 0.15);
+    transition:
+      color 0.15s,
+      border-color 0.15s,
+      transform 0.15s;
+    z-index: 50;
+  }
+
+  .kb-manage-fab:hover {
+    color: var(--accent);
+    border-color: var(--accent);
+    transform: scale(1.05);
   }
 </style>
